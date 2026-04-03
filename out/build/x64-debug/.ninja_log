@@ -1,0 +1,27 @@
+# ninja log v5
+28	625	7969331276759721	vendor/glfw/src/CMakeFiles/glfw.dir/monitor.c.obj	12c49434f04af3bb
+89	589	7969331276538087	vendor/glfw/src/CMakeFiles/glfw.dir/win32_module.c.obj	30d02975765d2217
+34	607	7969331276578190	vendor/glfw/src/CMakeFiles/glfw.dir/platform.c.obj	539a3fadbdda399d
+53	623	7969331276603286	vendor/glfw/src/CMakeFiles/glfw.dir/egl_context.c.obj	abdb88ed5c82ac2d
+77	599	7969331276558196	vendor/glfw/src/CMakeFiles/glfw.dir/null_window.c.obj	e8ce87064aede8fd
+58	624	7969331276698558	vendor/glfw/src/CMakeFiles/glfw.dir/osmesa_context.c.obj	cd4772d3b42e7833
+47	615	7969331276628375	vendor/glfw/src/CMakeFiles/glfw.dir/window.c.obj	fa5c3ad29cb0231d
+94	623	7969331276628375	vendor/glfw/src/CMakeFiles/glfw.dir/win32_time.c.obj	6c893193049b49c9
+41	622	7969331276618382	vendor/glfw/src/CMakeFiles/glfw.dir/vulkan.c.obj	6c71f9ede1314bb8
+553	732	7969335694452433	myapp.exe	7b56c7be27b21801
+100	626	7969331276749722	vendor/glfw/src/CMakeFiles/glfw.dir/win32_thread.c.obj	92ad3ac9de7d601
+83	626	7969331276764759	vendor/glfw/src/CMakeFiles/glfw.dir/null_joystick.c.obj	61e39ebb826dbb99
+106	627	7969331276774812	vendor/glfw/src/CMakeFiles/glfw.dir/win32_init.c.obj	99fee4ae3046a270
+64	627	7969331276658420	vendor/glfw/src/CMakeFiles/glfw.dir/null_init.c.obj	b9895f27ba4a3a15
+71	628	7969331276698558	vendor/glfw/src/CMakeFiles/glfw.dir/null_monitor.c.obj	f3fb925d48092a42
+17	629	7969331276799857	vendor/glfw/src/CMakeFiles/glfw.dir/init.c.obj	c903e56090136af7
+11	629	7969331276850060	vendor/glfw/src/CMakeFiles/glfw.dir/context.c.obj	a39e07376ac0c050
+22	630	7969331276860060	vendor/glfw/src/CMakeFiles/glfw.dir/input.c.obj	a377e34a4994a87e
+18	552	7969335693140533	CMakeFiles/myapp.dir/src/RealtimeFluidSim.cpp.obj	952a3fe94574a7ee
+615	827	7969331278961063	vendor/glfw/src/CMakeFiles/glfw.dir/wgl_context.c.obj	16522da7f334f17f
+591	832	7969331279026185	vendor/glfw/src/CMakeFiles/glfw.dir/win32_joystick.c.obj	2b9636ef56145a0b
+607	835	7969331279058660	vendor/glfw/src/CMakeFiles/glfw.dir/win32_window.c.obj	afd6c9ea3c56b580
+600	851	7969331279214500	vendor/glfw/src/CMakeFiles/glfw.dir/win32_monitor.c.obj	81a61d98145ab7cf
+851	917	7969331279817972	vendor/glfw/src/glfw3.lib	dd2ae3feb256f1a9
+24	835	7969335173426767	vendor/glm/glm/CMakeFiles/glm.dir/detail/glm.cpp.obj	a96b0e09fbcd2f2d
+835	906	7969335174071995	vendor/glm/glm/glm.lib	3b09461394e9d1aa
