@@ -13,13 +13,17 @@ add_subdirectory(vendor/glm)
 # Find system OpenGL
 find_package(OpenGL REQUIRED)
 
-add_executable(myapp
+# Find OpenMP on the system
+find_package(OpenMP REQUIRED)
+
+add_executable(RealtimeFluidSim
     "src/RealtimeFluidSim.cpp" "src/RealtimeFluidSim.h"
 )
 
-target_link_libraries(myapp
+target_link_libraries(RealtimeFluidSim
     PRIVATE
         glfw
         glm
         OpenGL::GL
+        OpenMP::OpenMP_CXX
 )
