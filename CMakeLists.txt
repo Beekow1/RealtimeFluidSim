@@ -4,11 +4,15 @@ project(RealtimeFluidSim LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Build GLFW from source 
+# Build GLFW from source
 add_subdirectory(vendor/glfw)
 
-# Build GLM from source 
+# Build GLM from source
 add_subdirectory(vendor/glm)
+
+# Build GLAD from source
+add_library(glad vendor/glad/src/glad.c)
+target_include_directories(glad PUBLIC vendor/glad/include)
 
 # Find system OpenGL
 find_package(OpenGL REQUIRED)
@@ -17,11 +21,13 @@ find_package(OpenGL REQUIRED)
 find_package(OpenMP REQUIRED)
 
 add_executable(RealtimeFluidSim
-    "src/RealtimeFluidSim.cpp" "src/RealtimeFluidSim.h"
+    src/RealtimeFluidSim.cpp
+    src/RealtimeFluidSim.h
 )
 
 target_link_libraries(RealtimeFluidSim
     PRIVATE
+        glad
         glfw
         glm
         OpenGL::GL

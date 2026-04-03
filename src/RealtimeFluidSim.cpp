@@ -1,5 +1,4 @@
-﻿// RealtimeFluidSim.cpp : Defines the entry point for the application.
-
+﻿#include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <iostream>
 #include <glm/glm.hpp>
@@ -10,6 +9,10 @@ int main() {
         return -1;
     }
 
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
     GLFWwindow* window = glfwCreateWindow(800, 600, "Fluid Simulator", nullptr, nullptr);
     if (!window) {
         std::cerr << "Failed to create window\n";
@@ -18,6 +21,15 @@ int main() {
     }
 
     glfwMakeContextCurrent(window);
+
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+        std::cerr << "Failed to initialize GLAD\n";
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return -1;
+    }
+
+    glViewport(0, 0, 800, 600);
 
     while (!glfwWindowShouldClose(window)) {
         glClear(GL_COLOR_BUFFER_BIT);
@@ -29,8 +41,5 @@ int main() {
     glfwDestroyWindow(window);
     glfwTerminate();
 
-
-    glm::vec3 t1(1, 2, 3);
-    glm::vec3 t2(3, 2, 1);
-    return glm::dot(t1, t2);
+    return 0;
 }
