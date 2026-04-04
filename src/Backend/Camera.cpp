@@ -5,7 +5,6 @@
 
 
 // Basic Blender style camera implementation. 
-
 Camera::Camera(glm::vec3 target, float distance, float yaw, float pitch)
     : target(target),
     position(0.0f, 0.0f, distance),

@@ -21,9 +21,9 @@ find_package(OpenGL REQUIRED)
 find_package(OpenMP REQUIRED)
 
 add_executable(RealtimeFluidSim
-    src/RealtimeFluidSim.cpp
-    src/RealtimeFluidSim.h
- "src/Camera.h" "src/Camera.cpp" "src/Shader.h" "src/Shader.cpp" "src/ParticleSystem.h" "src/ParticleSystem.cpp" "src/App.cpp")
+    "src/Backend/RealtimeFluidSim.cpp"
+    "src/Backend/RealtimeFluidSim.h"
+ "src/Backend/Camera.h" "src/Backend/Camera.cpp" "src/Backend/Shader.h" "src/Backend/Shader.cpp" "src/Backend/ParticleSystem.h" "src/Backend/ParticleSystem.cpp" "src/App.cpp")
 
 target_link_libraries(RealtimeFluidSim
     PRIVATE
