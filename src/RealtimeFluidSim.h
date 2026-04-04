@@ -1,8 +1,20 @@
-﻿// RealtimeFluidSim.h : Include file for standard system include files,
-// or project specific include files.
+﻿#pragma once
 
-#pragma once
+struct GLFWwindow;
 
-#include <iostream>
+class RealtimeFluidSim {
+public:
+    RealtimeFluidSim();
+    ~RealtimeFluidSim();
 
-// TODO: Reference additional headers your program requires here.
+    int run();
+
+private:
+    GLFWwindow* window;
+
+    bool initWindow();
+    bool initGL();
+    void setupCallbacks();
+    void mainLoop();
+    void cleanup();
+};

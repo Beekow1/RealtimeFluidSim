@@ -1,45 +1,178 @@
-﻿#include <glad/glad.h>
+﻿#include "RealtimeFluidSim.h"
+#include "Camera.h"
+#include "ParticleSystem.h"
+
+#include <glad/glad.h>
 #include <GLFW/glfw3.h>
-#include <iostream>
 #include <glm/glm.hpp>
 
-int main() {
+#include <iostream>
+#include <filesystem>
+
+namespace {
+    constexpr int WINDOW_WIDTH = 800;
+    constexpr int WINDOW_HEIGHT = 600;
+
+    Camera gCamera(glm::vec3(0.0f, 0.0f, 0.0f), 8.0f, -90.0f, 20.0f);
+
+    float gLastX = 0.0f;
+    float gLastY = 0.0f;
+    bool gFirstMouse = true;
+
+    ParticleSystem* gParticleSystem = nullptr;
+}
+
+static void framebufferSizeCallback(GLFWwindow* window, int width, int height) {
+    (void)window;
+    glViewport(0, 0, width, height);
+
+    if (gParticleSystem) {
+        gParticleSystem->setViewportSize(width, height);
+    }
+}
+
+static void mouseCallback(GLFWwindow* window, double xpos, double ypos) {
+    float mouseX = static_cast<float>(xpos);
+    float mouseY = static_cast<float>(ypos);
+
+    if (gFirstMouse) {
+        gLastX = mouseX;
+        gLastY = mouseY;
+        gFirstMouse = false;
+        return;
+    }
+
+    float deltaX = mouseX - gLastX;
+    float deltaY = mouseY - gLastY;
+
+    gLastX = mouseX;
+    gLastY = mouseY;
+
+    const bool altPressed =
+        glfwGetKey(window, GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
+        glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS;
+
+    if (!altPressed) {
+        return;
+    }
+
+    if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+        gCamera.orbit(deltaX, -deltaY);
+    }
+    else if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS) {
+        gCamera.pan(deltaX, deltaY);
+    }
+}
+
+static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset) {
+    (void)window;
+    (void)xoffset;
+    gCamera.zoom(static_cast<float>(yoffset));
+}
+
+static void processInput(GLFWwindow* window, float deltaTime) {
+    (void)deltaTime;
+
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+        glfwSetWindowShouldClose(window, true);
+    }
+}
+
+RealtimeFluidSim::RealtimeFluidSim() : window(nullptr) {}
+
+RealtimeFluidSim::~RealtimeFluidSim() {
+    cleanup();
+}
+
+int RealtimeFluidSim::run() {
+    if (!initWindow()) return -1;
+    if (!initGL()) return -1;
+
+    setupCallbacks();
+    mainLoop();
+    return 0;
+}
+
+bool RealtimeFluidSim::initWindow() {
     if (!glfwInit()) {
         std::cerr << "Failed to initialize GLFW\n";
-        return -1;
+        return false;
     }
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    GLFWwindow* window = glfwCreateWindow(800, 600, "Fluid Simulator", nullptr, nullptr);
+    window = glfwCreateWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Fluid Simulator", nullptr, nullptr);
     if (!window) {
         std::cerr << "Failed to create window\n";
         glfwTerminate();
-        return -1;
+        return false;
     }
 
     glfwMakeContextCurrent(window);
+    glfwSetInputMode(window, GLFW_STICKY_MOUSE_BUTTONS, GLFW_TRUE);
 
+    return true;
+}
+
+bool RealtimeFluidSim::initGL() {
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
         std::cerr << "Failed to initialize GLAD\n";
-        glfwDestroyWindow(window);
-        glfwTerminate();
-        return -1;
+        return false;
     }
 
-    glViewport(0, 0, 800, 600);
+    glViewport(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_PROGRAM_POINT_SIZE);
+
+    std::filesystem::path shaderDir = "../../../src/Shader";
+    std::string vertPath = (shaderDir / "Particle.vert").string();
+    std::string fragPath = (shaderDir / "Particle.frag").string();
+
+    gParticleSystem = new ParticleSystem(vertPath.c_str(), fragPath.c_str());
+    gParticleSystem->setViewportSize(WINDOW_WIDTH, WINDOW_HEIGHT);
+    gParticleSystem->generateGrid(20, 20, 20, 0.12f);
+
+    return true;
+}
+
+void RealtimeFluidSim::setupCallbacks() {
+    glfwSetFramebufferSizeCallback(window, framebufferSizeCallback);
+    glfwSetCursorPosCallback(window, mouseCallback);
+    glfwSetScrollCallback(window, scrollCallback);
+}
+
+void RealtimeFluidSim::mainLoop() {
+    float lastFrame = 0.0f;
 
     while (!glfwWindowShouldClose(window)) {
-        glClear(GL_COLOR_BUFFER_BIT);
+        float currentFrame = static_cast<float>(glfwGetTime());
+        float deltaTime = currentFrame - lastFrame;
+        lastFrame = currentFrame;
+
+        processInput(window, deltaTime);
+
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        if (gParticleSystem) {
+            gParticleSystem->draw(gCamera);
+        }
 
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
+}
 
-    glfwDestroyWindow(window);
+void RealtimeFluidSim::cleanup() {
+    delete gParticleSystem;
+    gParticleSystem = nullptr;
+
+    if (window) {
+        glfwDestroyWindow(window);
+        window = nullptr;
+    }
+
     glfwTerminate();
-
-    return 0;
 }
