@@ -1,6 +1,7 @@
 ﻿#include "RealtimeFluidSim.h"
 #include "Camera.h"
 #include "ParticleSystem.h"
+#include "../Fluid/FLIPSolver.hpp"
 
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -20,6 +21,7 @@ namespace {
     bool gFirstMouse = true;
 
     ParticleSystem* gParticleSystem = nullptr;
+    FLIPSolver* gFluidSolver = nullptr;
 }
 
 static void framebufferSizeCallback(GLFWwindow* window, int width, int height) {
@@ -78,7 +80,7 @@ static void processInput(GLFWwindow* window, float deltaTime) {
     }
 }
 
-RealtimeFluidSim::RealtimeFluidSim() : window(nullptr) {}
+RealtimeFluidSim::RealtimeFluidSim() : window(nullptr), particleSystem(nullptr), fluidSolver(nullptr) {}
 
 RealtimeFluidSim::~RealtimeFluidSim() {
     cleanup();
@@ -131,8 +133,54 @@ bool RealtimeFluidSim::initGL() {
     std::string fragPath = (shaderDir / "Particle.frag").string();
 
     gParticleSystem = new ParticleSystem(vertPath.c_str(), fragPath.c_str());
+    particleSystem = gParticleSystem;
     gParticleSystem->setViewportSize(WINDOW_WIDTH, WINDOW_HEIGHT);
-    gParticleSystem->generateGrid(20, 20, 20, 0.12f);
+
+    // Initialize FLIP solver (20x20x20 grid, cell spacing 0.12)
+    const int gridResX = 20;
+    const int gridResY = 20;
+    const int gridResZ = 20;
+    const float cellSize = 0.12f;
+    
+    gFluidSolver = new FLIPSolver(gridResX, gridResY, gridResZ, cellSize);
+    fluidSolver = gFluidSolver;
+
+    // Initialize ParticleSystem VAO/VBO with generateGrid
+    gParticleSystem->generateGrid(gridResX, gridResY, gridResZ, cellSize);
+
+    // Initialize particles in the solver
+    std::vector<Particle> initialParticles;
+    initialParticles.reserve(gridResX * gridResY * gridResZ);
+    
+    float domainCenterX = (gridResX - 1) * cellSize * 0.5f;
+    float domainCenterY = (gridResY - 1) * cellSize * 0.5f;
+    float domainCenterZ = (gridResZ - 1) * cellSize * 0.5f;
+
+    for (int z = 0; z < gridResZ; ++z) {
+        for (int y = 0; y < gridResY; ++y) {
+            for (int x = 0; x < gridResX; ++x) {
+                Vec3 pos(
+                    x * cellSize - domainCenterX,
+                    y * cellSize - domainCenterY,
+                    z * cellSize - domainCenterZ
+                );
+                Particle p;
+                p.pos = pos;
+                p.vel = Vec3(0.0f, 0.0f, 0.0f);
+                initialParticles.push_back(p);
+            }
+        }
+    }
+    
+    gFluidSolver->addParticles(initialParticles);
+
+    // Sync initial positions to rendering system
+    std::vector<glm::vec3> displayPositions;
+    displayPositions.reserve(initialParticles.size());
+    for (const auto& p : initialParticles) {
+        displayPositions.push_back(glm::vec3(p.pos.x, p.pos.y, p.pos.z));
+    }
+    gParticleSystem->setGridPos(displayPositions);
 
     return true;
 }
@@ -151,7 +199,28 @@ void RealtimeFluidSim::mainLoop() {
         float deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
 
+        // Cap deltaTime to prevent large jumps
+        if (deltaTime > 0.033f) deltaTime = 0.033f;
+
         processInput(window, deltaTime);
+
+        // Update fluid simulation
+        if (gFluidSolver) {
+            gFluidSolver->step(deltaTime);
+
+            // Sync particle positions from solver to rendering system
+            const auto& solverParticles = gFluidSolver->getParticles();
+            std::vector<glm::vec3> displayPositions;
+            displayPositions.reserve(solverParticles.size());
+            
+            for (const auto& p : solverParticles) {
+                displayPositions.push_back(glm::vec3(p.pos.x, p.pos.y, p.pos.z));
+            }
+            
+            if (gParticleSystem) {
+                gParticleSystem->setGridPos(displayPositions);
+            }
+        }
 
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -166,8 +235,13 @@ void RealtimeFluidSim::mainLoop() {
 }
 
 void RealtimeFluidSim::cleanup() {
+    delete gFluidSolver;
+    gFluidSolver = nullptr;
+    fluidSolver = nullptr;
+
     delete gParticleSystem;
     gParticleSystem = nullptr;
+    particleSystem = nullptr;
 
     if (window) {
         glfwDestroyWindow(window);

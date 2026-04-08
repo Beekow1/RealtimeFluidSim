@@ -1,6 +1,8 @@
 ﻿#pragma once
 
 struct GLFWwindow;
+class ParticleSystem;
+class FLIPSolver;
 
 class RealtimeFluidSim {
 public:
@@ -11,6 +13,8 @@ public:
 
 private:
     GLFWwindow* window;
+    ParticleSystem* particleSystem;
+    FLIPSolver* fluidSolver;
 
     bool initWindow();
     bool initGL();

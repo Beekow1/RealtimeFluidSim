@@ -23,7 +23,19 @@ find_package(OpenMP REQUIRED)
 add_executable(RealtimeFluidSim
     "src/Backend/RealtimeFluidSim.cpp"
     "src/Backend/RealtimeFluidSim.h"
- "src/Backend/Camera.h" "src/Backend/Camera.cpp" "src/Backend/Shader.h" "src/Backend/Shader.cpp" "src/Backend/ParticleSystem.h" "src/Backend/ParticleSystem.cpp" "src/App.cpp")
+    "src/Backend/Camera.h"
+    "src/Backend/Camera.cpp"
+    "src/Backend/Shader.h"
+    "src/Backend/Shader.cpp"
+    "src/Backend/ParticleSystem.h"
+    "src/Backend/ParticleSystem.cpp"
+    "src/App.cpp"
+    "src/Fluid/FLIPSolver.cpp"
+    "src/Fluid/FLIPSolver.hpp"
+    "src/Fluid/FLIPInterpolation.cpp"
+    "src/Fluid/FLIPParticle.hpp"
+    "src/Fluid/MACGrid.hpp"
+)
 
 target_link_libraries(RealtimeFluidSim
     PRIVATE
