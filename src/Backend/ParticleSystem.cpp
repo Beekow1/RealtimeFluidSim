@@ -35,13 +35,13 @@ void ParticleSystem::generateGrid(int countX, int countY, int countZ, float spac
         (countZ - 1) * spacing * 0.5f
     );
 
-    for (int z = 0; z < countZ; ++z) {
-        for (int y = 0; y < countY; ++y) {
-            for (int x = 0; x < countX; ++x) {
+    for (int z = 0; z < countZ / 2; ++z) {
+        for (int y = 0; y < countY / 2; ++y) {
+            for (int x = 0; x < countX / 2; ++x) {
                 glm::vec3 pos(
-                    x * spacing,
-                    y * spacing,
-                    z * spacing
+                    (x + 0.5) * spacing,
+                    (y + 0.5) * spacing,
+                    (z + 0.5) * spacing
                 );
                 particles.push_back({ pos - center, glm::vec3 (x/(float) countX, y/(float) countY, z/(float) countZ)});
             }
@@ -62,25 +62,79 @@ void ParticleSystem::generateGrid(int countX, int countY, int countZ, float spac
     glBindVertexArray(0);
 }
 
-void ParticleSystem::setGridPos(std::vector<glm::vec3> posP) {
-    for (int i = 0; i < particles.size(); i++) { // Could maybe optimize with OMP paralellism?
+void ParticleSystem::setGridPos(const std::vector<glm::vec3>& posP) {
+    if (particles.size() != posP.size()) {
+        particles.resize(posP.size());
+        for (size_t i = 0; i < posP.size(); ++i) {
+            particles[i].pos = posP[i];
+            particles[i].col = glm::vec3(0.2f, 0.5f, 1.0f);
+            particles[i].vel = glm::vec3(0.0f);
+        }
+
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, particles.size() * sizeof(Particle), particles.data(), GL_STREAM_DRAW);
+
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Particle), (void*)offsetof(Particle, pos));
+        glEnableVertexAttribArray(0);
+
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Particle), (void*)offsetof(Particle, col));
+        glEnableVertexAttribArray(1);
+
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
+        return;
+    }
+
+    for (size_t i = 0; i < posP.size(); ++i) {
         particles[i].pos = posP[i];
     }
+
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glBufferSubData(GL_ARRAY_BUFFER, 0, particles.size() * sizeof(Particle), particles.data());
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
+static glm::vec3 velocityToColor(const glm::vec3& vel) {
+    const float speed = glm::length(vel);
 
-void ParticleSystem::setVelocity (std::vector<glm::vec3> velP) {
-    for (int i = 0; i < particles.size(); i++) { // Could maybe optimize with OMP paralellism?
-        particles[i].vel = velP[i];
+    const float minSpeed = 0.0f;
+    const float maxSpeed = 8.0f;
+
+    float t = (speed - minSpeed) / (maxSpeed - minSpeed);
+    t = glm::clamp(t, 0.0f, 1.0f);
+
+    if (t < 0.33f) {
+        float u = t / 0.33f;
+        return glm::mix(glm::vec3(0.0f, 0.2f, 1.0f), glm::vec3(0.0f, 1.0f, 1.0f), u);
     }
+    if (t < 0.66f) {
+        float u = (t - 0.33f) / 0.33f;
+        return glm::mix(glm::vec3(0.0f, 1.0f, 1.0f), glm::vec3(1.0f, 1.0f, 0.0f), u);
+    }
+
+    float u = (t - 0.66f) / 0.34f;
+    return glm::mix(glm::vec3(1.0f, 1.0f, 0.0f), glm::vec3(1.0f, 0.0f, 0.0f), u);
 }
 
-void ParticleSystem::moveGridPos(std::vector<glm::vec3> posP) {
-    for (int i = 0; i < particles.size(); i++) { // Could maybe optimize with OMP paralellism?
+void ParticleSystem::setVelocity(const std::vector<glm::vec3>& velP) {
+    const size_t count = std::min(particles.size(), velP.size());
+
+    for (size_t i = 0; i < count; ++i) {
+        particles[i].vel = velP[i];
+        particles[i].col = velocityToColor(velP[i]);
+    }
+
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, particles.size() * sizeof(Particle), particles.data());
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+void ParticleSystem::moveGridPos(const std::vector<glm::vec3>& posP) {
+    const size_t count = std::min(particles.size(), posP.size());
+
+    for (size_t i = 0; i < count; ++i) {
         particles[i].pos += posP[i];
     }
+
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glBufferSubData(GL_ARRAY_BUFFER, 0, particles.size() * sizeof(Particle), particles.data());
     glBindBuffer(GL_ARRAY_BUFFER, 0);

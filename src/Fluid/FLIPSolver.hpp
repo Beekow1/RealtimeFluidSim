@@ -1,45 +1,57 @@
 #pragma once
 
-#include "MACGrid.hpp"
 #include "FLIPParticle.hpp"
-#include <vector>
+#include "MACGrid.hpp"
+
 #include <glm/glm.hpp>
+#include <vector>
 
 using Vec3 = glm::vec3;
 
 enum CellType {
-	AIR,
-	WATER,
-	SOLID
+    AIR,
+    WATER,
+    SOLID
 };
 
 class FLIPSolver {
 public:
-	FLIPSolver(int nx, int ny, int nz, float h)
-		: grid(nx, ny, nz, h),
-		cellType(nx * ny * nz, AIR) {}
+    FLIPSolver(int nx, int ny, int nz, float h);
 
-	void step(float dt);
-	
-	std::vector<Particle>& getParticles() { return particles; }
-	const std::vector<Particle>& getParticles() const { return particles; }
-	
-	void addParticles(const std::vector<Particle>& newParticles) {
-		particles.insert(particles.end(), newParticles.begin(), newParticles.end());
-	}
+    void step(float dt);
+
+    std::vector<Particle>& getParticles() { return particles; }
+    const std::vector<Particle>& getParticles() const { return particles; }
+
+    void addParticles(const std::vector<Particle>& newParticles) {
+        particles.insert(particles.end(), newParticles.begin(), newParticles.end());
+    }
+
+    void clearParticles() { particles.clear(); }
 
 private:
-	MACGrid grid;
-	std::vector<Particle> particles;
-	std::vector<CellType> cellType;
+    MACGrid grid;
+    std::vector<Particle> particles;
+    std::vector<CellType> cellType;
 
-	void advectParticles(float dt);
-	void markFluidCells();
-	void particlesToGrid();
-	void addGravity(float dt);
-	void solvePressure(float dt);
-	void applyBoundaryConditions();
-	void gridToParticles(const MACGrid& oldGrid, float dt);
+    float materialDensity;
+    float flipRatio;
 
-	Vec3 sampleMAC(const MACGrid& g, const Vec3& x) const;
+    int pressureIterations;
+
+    void advectParticles(float dt);
+    void markFluidCells();
+    void particlesToGrid();
+    void addGravity(float dt);
+    void solvePressure(float dt);
+    void applyBoundaryConditions();
+    void applyGridBoundaryConditions();
+    void gridToParticles(const MACGrid& oldGrid, float dt);
+
+    float sampleMACComponent(const MACGrid& g, const Vec3& pos, const Vec3& offset, int maxI, int maxJ, int maxK, float (MACGrid::* accessor)(int, int, int) const) const;
+
+    Vec3 sampleMAC(const MACGrid& g, const Vec3& x) const;
+
+    int cellIndex(int i, int j, int k) const;
+    bool isValidCell(int i, int j, int k) const;
 };

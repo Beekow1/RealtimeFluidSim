@@ -4,6 +4,11 @@ project(RealtimeFluidSim LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Default to Release for single-config generators if not specified
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 # Build GLFW from source
 add_subdirectory(vendor/glfw)
 
@@ -32,7 +37,7 @@ add_executable(RealtimeFluidSim
     "src/App.cpp"
     "src/Fluid/FLIPSolver.cpp"
     "src/Fluid/FLIPSolver.hpp"
-    "src/Fluid/FLIPInterpolation.cpp"
+    
     "src/Fluid/FLIPParticle.hpp"
     "src/Fluid/MACGrid.hpp"
 )
@@ -45,3 +50,10 @@ target_link_libraries(RealtimeFluidSim
         OpenGL::GL
         OpenMP::OpenMP_CXX
 )
+
+# Optional: extra warnings
+if(MSVC)
+    target_compile_options(RealtimeFluidSim PRIVATE /W4)
+else()
+    target_compile_options(RealtimeFluidSim PRIVATE -Wall -Wextra -Wpedantic)
+endif()

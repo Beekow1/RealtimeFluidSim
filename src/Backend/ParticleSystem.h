@@ -20,9 +20,9 @@ public:
     void generateGrid(int countX, int countY, int countZ, float spacing);
     void draw(const Camera& camera);
     void setViewportSize(int width, int height);
-    void setGridPos(std::vector<glm::vec3> posP);
-    void moveGridPos(std::vector<glm::vec3> posP);
-    void setVelocity(std::vector<glm::vec3> velP);
+    void setGridPos(const std::vector<glm::vec3>& posP);
+    void moveGridPos(const std::vector<glm::vec3>& posP);
+    void setVelocity(const std::vector<glm::vec3>& velP);
     void update(float dt);
 private:
     unsigned int vao;

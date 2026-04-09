@@ -136,19 +136,16 @@ bool RealtimeFluidSim::initGL() {
     particleSystem = gParticleSystem;
     gParticleSystem->setViewportSize(WINDOW_WIDTH, WINDOW_HEIGHT);
 
-    // Initialize FLIP solver (20x20x20 grid, cell spacing 0.12)
     const int gridResX = 20;
     const int gridResY = 20;
     const int gridResZ = 20;
-    const float cellSize = 0.12f;
+    const float cellSize = 0.3f;
     
     gFluidSolver = new FLIPSolver(gridResX, gridResY, gridResZ, cellSize);
     fluidSolver = gFluidSolver;
 
-    // Initialize ParticleSystem VAO/VBO with generateGrid
     gParticleSystem->generateGrid(gridResX, gridResY, gridResZ, cellSize);
 
-    // Initialize particles in the solver
     std::vector<Particle> initialParticles;
     initialParticles.reserve(gridResX * gridResY * gridResZ);
     
@@ -156,18 +153,33 @@ bool RealtimeFluidSim::initGL() {
     float domainCenterY = (gridResY - 1) * cellSize * 0.5f;
     float domainCenterZ = (gridResZ - 1) * cellSize * 0.5f;
 
-    for (int z = 0; z < gridResZ; ++z) {
-        for (int y = 0; y < gridResY; ++y) {
-            for (int x = 0; x < gridResX; ++x) {
-                Vec3 pos(
-                    x * cellSize - domainCenterX,
-                    y * cellSize - domainCenterY,
-                    z * cellSize - domainCenterZ
-                );
-                Particle p;
-                p.pos = pos;
-                p.vel = Vec3(0.0f, 0.0f, 0.0f);
-                initialParticles.push_back(p);
+    const int ppc = 6;
+    const float invPpc = 1.0f / static_cast<float>(ppc);
+
+    const int startX = 0;
+    const int startY = 6;
+    const int startZ = 0;
+
+    for (int z = 0; z < gridResZ / 2; ++z) {
+        for (int y = 0; y < gridResY / 2; ++y) {
+            for (int x = 0; x < gridResX / 2; ++x) {
+                for (int oz = 0; oz < ppc; ++oz) {
+                    for (int oy = 0; oy < ppc; ++oy) {
+                        for (int ox = 0; ox < ppc; ++ox) {
+                            Particle p;
+                            p.pos = Vec3(
+                                (startX + x + (ox + 0.5f) * invPpc) * cellSize,
+                                (startY + y + (oy + 0.5f) * invPpc) * cellSize,
+                                (startZ + z + (oz + 0.5f) * invPpc) * cellSize
+                            );
+
+                            // optional: give it a little shove so it sloshes
+                            p.vel = Vec3(0.6f, 0.0f, 0.2f);
+
+                            initialParticles.push_back(p);
+                        }
+                    }
+                }
             }
         }
     }
@@ -208,17 +220,21 @@ void RealtimeFluidSim::mainLoop() {
         if (gFluidSolver) {
             gFluidSolver->step(deltaTime);
 
-            // Sync particle positions from solver to rendering system
             const auto& solverParticles = gFluidSolver->getParticles();
+
             std::vector<glm::vec3> displayPositions;
+            std::vector<glm::vec3> displayVelocities;
             displayPositions.reserve(solverParticles.size());
-            
+            displayVelocities.reserve(solverParticles.size());
+
             for (const auto& p : solverParticles) {
                 displayPositions.push_back(glm::vec3(p.pos.x, p.pos.y, p.pos.z));
+                displayVelocities.push_back(glm::vec3(p.vel.x, p.vel.y, p.vel.z));
             }
-            
+
             if (gParticleSystem) {
                 gParticleSystem->setGridPos(displayPositions);
+                gParticleSystem->setVelocity(displayVelocities);
             }
         }
 
