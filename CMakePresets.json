@@ -1,101 +1,229 @@
 ﻿{
-    "version": 3,
-    "configurePresets": [
-        {
-            "name": "windows-base",
-            "hidden": true,
-            "generator": "Ninja",
-            "binaryDir": "${sourceDir}/out/build/${presetName}",
-            "installDir": "${sourceDir}/out/install/${presetName}",
-            "cacheVariables": {
-                "CMAKE_C_COMPILER": "cl.exe",
-                "CMAKE_CXX_COMPILER": "cl.exe"
-            },
-            "condition": {
-                "type": "equals",
-                "lhs": "${hostSystemName}",
-                "rhs": "Windows"
-            }
-        },
-        {
-            "name": "x64-debug",
-            "displayName": "x64 Debug",
-            "inherits": "windows-base",
-            "architecture": {
-                "value": "x64",
-                "strategy": "external"
-            },
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug"
-            }
-        },
-        {
-            "name": "x64-release",
-            "displayName": "x64 Release",
-            "inherits": "x64-debug",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release"
-            }
-        },
-        {
-            "name": "x86-debug",
-            "displayName": "x86 Debug",
-            "inherits": "windows-base",
-            "architecture": {
-                "value": "x86",
-                "strategy": "external"
-            },
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug"
-            }
-        },
-        {
-            "name": "x86-release",
-            "displayName": "x86 Release",
-            "inherits": "x86-debug",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release"
-            }
-        },
-        {
-            "name": "linux-debug",
-            "displayName": "Linux Debug",
-            "generator": "Ninja",
-            "binaryDir": "${sourceDir}/out/build/${presetName}",
-            "installDir": "${sourceDir}/out/install/${presetName}",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug"
-            },
-            "condition": {
-                "type": "equals",
-                "lhs": "${hostSystemName}",
-                "rhs": "Linux"
-            },
-            "vendor": {
-                "microsoft.com/VisualStudioRemoteSettings/CMake/1.0": {
-                    "sourceDir": "$env{HOME}/.vs/$ms{projectDirName}"
-                }
-            }
-        },
-        {
-            "name": "macos-debug",
-            "displayName": "macOS Debug",
-            "generator": "Ninja",
-            "binaryDir": "${sourceDir}/out/build/${presetName}",
-            "installDir": "${sourceDir}/out/install/${presetName}",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug"
-            },
-            "condition": {
-                "type": "equals",
-                "lhs": "${hostSystemName}",
-                "rhs": "Darwin"
-            },
-            "vendor": {
-                "microsoft.com/VisualStudioRemoteSettings/CMake/1.0": {
-                    "sourceDir": "$env{HOME}/.vs/$ms{projectDirName}"
-                }
-            }
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "windows-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "installDir": "${sourceDir}/out/install/${presetName}",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl.exe",
+        "CMAKE_CXX_COMPILER": "cl.exe"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "linux-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "installDir": "${sourceDir}/out/install/${presetName}",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "vendor": {
+        "microsoft.com/VisualStudioRemoteSettings/CMake/1.0": {
+          "sourceDir": "$env{HOME}/.vs/$ms{projectDirName}"
         }
-    ]
+      }
+    },
+    {
+      "name": "macos-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "installDir": "${sourceDir}/out/install/${presetName}",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "vendor": {
+        "microsoft.com/VisualStudioRemoteSettings/CMake/1.0": {
+          "sourceDir": "$env{HOME}/.vs/$ms{projectDirName}"
+        }
+      }
+    },
+
+    {
+      "name": "x64-debug-cpu",
+      "displayName": "x64 Debug CPU",
+      "inherits": "windows-base",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "USE_SOLVER_GPU": "CPU"
+      }
+    },
+    {
+      "name": "x64-release-cpu",
+      "displayName": "x64 Release CPU",
+      "inherits": "x64-debug-cpu",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "x86-debug-cpu",
+      "displayName": "x86 Debug CPU",
+      "inherits": "windows-base",
+      "architecture": {
+        "value": "x86",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "USE_SOLVER_GPU": "CPU"
+      }
+    },
+    {
+      "name": "x86-release-cpu",
+      "displayName": "x86 Release CPU",
+      "inherits": "x86-debug-cpu",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+
+    {
+      "name": "x64-debug-gpu",
+      "displayName": "x64 Debug GPU",
+      "inherits": "windows-base",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "USE_SOLVER_GPU": "GPU",
+        "RFS_CUDA_ARCHITECTURES": "86"
+      }
+    },
+    {
+      "name": "x64-release-gpu",
+      "displayName": "x64 Release GPU",
+      "inherits": "x64-debug-gpu",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+
+    {
+      "name": "linux-debug-cpu",
+      "displayName": "Linux Debug CPU",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "USE_SOLVER_GPU": "CPU"
+      }
+    },
+    {
+      "name": "linux-release-cpu",
+      "displayName": "Linux Release CPU",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "USE_SOLVER_GPU": "CPU"
+      }
+    },
+    {
+      "name": "linux-debug-gpu",
+      "displayName": "Linux Debug GPU",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "USE_SOLVER_GPU": "GPU",
+        "RFS_CUDA_ARCHITECTURES": "86"
+      }
+    },
+    {
+      "name": "linux-release-gpu",
+      "displayName": "Linux Release GPU",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "USE_SOLVER_GPU": "GPU",
+        "RFS_CUDA_ARCHITECTURES": "86"
+      }
+    },
+
+    {
+      "name": "macos-debug-cpu",
+      "displayName": "macOS Debug CPU",
+      "inherits": "macos-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "USE_SOLVER_GPU": "CPU"
+      }
+    },
+    {
+      "name": "macos-release-cpu",
+      "displayName": "macOS Release CPU",
+      "inherits": "macos-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "USE_SOLVER_GPU": "CPU"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "x64-debug-cpu",
+      "configurePreset": "x64-debug-cpu"
+    },
+    {
+      "name": "x64-release-cpu",
+      "configurePreset": "x64-release-cpu"
+    },
+    {
+      "name": "x86-debug-cpu",
+      "configurePreset": "x86-debug-cpu"
+    },
+    {
+      "name": "x86-release-cpu",
+      "configurePreset": "x86-release-cpu"
+    },
+    {
+      "name": "x64-debug-gpu",
+      "configurePreset": "x64-debug-gpu"
+    },
+    {
+      "name": "x64-release-gpu",
+      "configurePreset": "x64-release-gpu"
+    },
+    {
+      "name": "linux-debug-cpu",
+      "configurePreset": "linux-debug-cpu"
+    },
+    {
+      "name": "linux-release-cpu",
+      "configurePreset": "linux-release-cpu"
+    },
+    {
+      "name": "linux-debug-gpu",
+      "configurePreset": "linux-debug-gpu"
+    },
+    {
+      "name": "linux-release-gpu",
+      "configurePreset": "linux-release-gpu"
+    },
+    {
+      "name": "macos-debug-cpu",
+      "configurePreset": "macos-debug-cpu"
+    },
+    {
+      "name": "macos-release-cpu",
+      "configurePreset": "macos-release-cpu"
+    }
+  ]
 }
