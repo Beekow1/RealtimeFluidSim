@@ -1,8 +1,10 @@
 #include "FLIPSolver.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <iostream>
 #include <queue>
 #include <vector>
 #define GLM_ENABLE_EXPERIMENTAL
@@ -45,22 +47,68 @@ void FLIPSolver::step(float dt) {
     const int substeps = std::max(1, static_cast<int>(std::ceil(dt / maxSubstep)));
     const float subDt = dt / static_cast<float>(substeps);
 
+    stats.reset();
+
     for (int s = 0; s < substeps; ++s) {
+        auto start = std::chrono::high_resolution_clock::now();
+        if (mode != SimulationMode::SERIAL && mode != SimulationMode::PARALLEL_NO_SORT) {
+            sortParticles();
+        }
+        auto end = std::chrono::high_resolution_clock::now();
+        stats.t_sort += std::chrono::duration<double>(end - start).count();
+
+        start = std::chrono::high_resolution_clock::now();
         markFluidCells();
         particlesToGrid();
+        end = std::chrono::high_resolution_clock::now();
+        stats.t_p2g += std::chrono::duration<double>(end - start).count();
+
+        start = std::chrono::high_resolution_clock::now();
         applyGridBoundaryConditions();
-
         MACGrid oldGrid = grid;
-
         addGravity(subDt);
         applyGridBoundaryConditions();
-        solvePressure(subDt);
+        
+        if (mode == SimulationMode::PARALLEL_RBGS) {
+            solvePressureRBGS(subDt);
+        } else {
+            solvePressure(subDt);
+        }
+
         applyGridBoundaryConditions();
+        end = std::chrono::high_resolution_clock::now();
+        stats.t_grid += std::chrono::duration<double>(end - start).count();
 
 
+        start = std::chrono::high_resolution_clock::now();
         gridToParticles(oldGrid, subDt);
+        end = std::chrono::high_resolution_clock::now();
+        stats.t_g2p += std::chrono::duration<double>(end - start).count();
+
+        start = std::chrono::high_resolution_clock::now();
         advectParticles(subDt);
         applyBoundaryConditions();
+        end = std::chrono::high_resolution_clock::now();
+        stats.t_advect += std::chrono::duration<double>(end - start).count();
+    }
+
+    aggrStats.add(stats);
+    
+    // Print aggregated stats every 60 frames
+    if (aggrStats.frameCount >= 60) {
+        double total = aggrStats.sum_sort + aggrStats.sum_p2g + aggrStats.sum_grid + aggrStats.sum_g2p + aggrStats.sum_advect;
+        double f = 1.0 / aggrStats.frameCount;
+        
+        printf("\n--- AVG OVER 60 FRAMES (Mode: %d) ---\n", static_cast<int>(mode));
+        printf("Sort:   %.4f ms\n", aggrStats.sum_sort * f * 1000.0);
+        printf("P2G:    %.4f ms\n", aggrStats.sum_p2g * f * 1000.0);
+        printf("Grid:   %.4f ms\n", aggrStats.sum_grid * f * 1000.0);
+        printf("G2P:    %.4f ms\n", aggrStats.sum_g2p * f * 1000.0);
+        printf("Advect: %.4f ms\n", aggrStats.sum_advect * f * 1000.0);
+        printf("TOTAL:  %.4f ms (%.1f FPS)\n", total * f * 1000.0, 1.0 / (total * f));
+        printf("------------------------------------\n");
+        
+        aggrStats.reset();
     }
 }
 
@@ -81,7 +129,7 @@ void FLIPSolver::markFluidCells() {
     );
 
     // Mark cells containing particles as WATER and OCCUPIED
-#pragma omp parallel
+#pragma omp parallel if(mode != SimulationMode::SERIAL)
     {
         const int tid = omp_get_thread_num();
         auto& mask = localMasks[tid];
@@ -103,7 +151,7 @@ void FLIPSolver::markFluidCells() {
         }
     }
 
-#pragma omp parallel for
+#pragma omp parallel for if(mode != SimulationMode::SERIAL)
     for (int idx = 0; idx < totalCells; ++idx) {
         bool occupied = false;
         for (int t = 0; t < threadCount; ++t) {
@@ -123,7 +171,9 @@ void FLIPSolver::particlesToGrid() {
     float h = grid.getDims();
 
     // For each particle, distribute its velocity to surrounding grid nodes
-    for (const auto& particle : particles) {
+#pragma omp parallel for if(mode != SimulationMode::SERIAL)
+    for (int pIdx = 0; pIdx < static_cast<int>(particles.size()); ++pIdx) {
+        const auto& particle = particles[pIdx];
         // Convert world position to grid coordinates
         Vec3 gridPos = particle.pos / h;
 
@@ -157,8 +207,16 @@ void FLIPSolver::particlesToGrid() {
                         uk >= 0 && uk < grid.getNz()) {
 
                         float weight = trilinearWeight(fx, fy, fz, di, dj, dk);
-                        grid.U(ui, uj, uk) += weight * particle.vel.x;
-                        grid.getWeightU(ui, uj, uk) += weight;
+                        float val = weight * particle.vel.x;
+                        if (mode != SimulationMode::SERIAL) {
+#pragma omp atomic
+                            grid.U(ui, uj, uk) += val;
+#pragma omp atomic
+                            grid.getWeightU(ui, uj, uk) += weight;
+                        } else {
+                            grid.U(ui, uj, uk) += val;
+                            grid.getWeightU(ui, uj, uk) += weight;
+                        }
                     }
                 }
             }
@@ -177,8 +235,16 @@ void FLIPSolver::particlesToGrid() {
                         vk >= 0 && vk < grid.getNz()) {
 
                         float weight = trilinearWeight(fx, fy, fz, di, dj, dk);
-                        grid.V(vi, vj, vk) += weight * particle.vel.y;
-                        grid.getWeightV(vi, vj, vk) += weight;
+                        float val = weight * particle.vel.y;
+                        if (mode != SimulationMode::SERIAL) {
+#pragma omp atomic
+                            grid.V(vi, vj, vk) += val;
+#pragma omp atomic
+                            grid.getWeightV(vi, vj, vk) += weight;
+                        } else {
+                            grid.V(vi, vj, vk) += val;
+                            grid.getWeightV(vi, vj, vk) += weight;
+                        }
                     }
                 }
             }
@@ -197,8 +263,16 @@ void FLIPSolver::particlesToGrid() {
                         wk >= 0 && wk <= grid.getNz()) {
 
                         float weight = trilinearWeight(fx, fy, fz, di, dj, dk);
-                        grid.W(wi, wj, wk) += weight * particle.vel.z;
-                        grid.getWeightW(wi, wj, wk) += weight;
+                        float val = weight * particle.vel.z;
+                        if (mode != SimulationMode::SERIAL) {
+#pragma omp atomic
+                            grid.W(wi, wj, wk) += val;
+#pragma omp atomic
+                            grid.getWeightW(wi, wj, wk) += weight;
+                        } else {
+                            grid.W(wi, wj, wk) += val;
+                            grid.getWeightW(wi, wj, wk) += weight;
+                        }
                     }
                 }
             }
@@ -206,7 +280,7 @@ void FLIPSolver::particlesToGrid() {
     }
 
     // Normalize by weights
-#pragma omp parallel for collapse(3) if(grid.getNx() * grid.getNy() * grid.getNz() > 1024)
+#pragma omp parallel for if(mode != SimulationMode::SERIAL && grid.getNx() * grid.getNy() * grid.getNz() > 1024)
     for (int i = 0; i <= grid.getNx(); ++i) {
         for (int j = 0; j < grid.getNy(); ++j) {
             for (int k = 0; k < grid.getNz(); ++k) {
@@ -217,7 +291,7 @@ void FLIPSolver::particlesToGrid() {
             }
         }
     }
-#pragma omp parallel for collapse(3) if(grid.getNx() * grid.getNy() * grid.getNz() > 1024)
+#pragma omp parallel for if(mode != SimulationMode::SERIAL && grid.getNx() * grid.getNy() * grid.getNz() > 1024)
     for (int i = 0; i < grid.getNx(); ++i) {
         for (int j = 0; j <= grid.getNy(); ++j) {
             for (int k = 0; k < grid.getNz(); ++k) {
@@ -228,7 +302,7 @@ void FLIPSolver::particlesToGrid() {
             }
         }
     }
-#pragma omp parallel for collapse(3) if(grid.getNx() * grid.getNy() * grid.getNz() > 1024)
+#pragma omp parallel for if(mode != SimulationMode::SERIAL && grid.getNx() * grid.getNy() * grid.getNz() > 1024)
     for (int i = 0; i < grid.getNx(); ++i) {
         for (int j = 0; j < grid.getNy(); ++j) {
             for (int k = 0; k <= grid.getNz(); ++k) {
@@ -243,7 +317,7 @@ void FLIPSolver::particlesToGrid() {
 
 void FLIPSolver::addGravity(float dt) {
 	const Vec3 gravity(0.0f, -9.81f, 0.0f);
-#pragma omp parallel for collapse(3) if(grid.getNx() * grid.getNy() * grid.getNz() > 1024)
+#pragma omp parallel for if(mode != SimulationMode::SERIAL && grid.getNx() * grid.getNy() * grid.getNz() > 1024)
 	for (int i = 0; i < grid.getNx(); ++i) {
 		for (int j = 0; j <= grid.getNy(); ++j) {
 			for (int k = 0; k < grid.getNz(); ++k) {
@@ -267,7 +341,7 @@ void FLIPSolver::solvePressure(float dt) {
     std::vector<float> pNew(nCells, 0.0f);
 
     for (int iter = 0; iter < pressureIterations; ++iter) {
-#pragma omp parallel for collapse(3) if(nCells > 1024)
+#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
         for (int k = 0; k < nz; ++k) {
             for (int j = 0; j < ny; ++j) {
                 for (int i = 0; i < nx; ++i) {
@@ -310,7 +384,7 @@ void FLIPSolver::solvePressure(float dt) {
         pOld.swap(pNew);
     }
 
-#pragma omp parallel for collapse(3) if(nCells > 1024)
+#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
     for (int k = 0; k < nz; ++k) {
         for (int j = 0; j < ny; ++j) {
             for (int i = 0; i < nx; ++i) {
@@ -319,7 +393,7 @@ void FLIPSolver::solvePressure(float dt) {
         }
     }
 
-#pragma omp parallel for collapse(3) if(nCells > 1024)
+#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
     for (int i = 1; i < nx; ++i) {
         for (int j = 0; j < ny; ++j) {
             for (int k = 0; k < nz; ++k) {
@@ -342,7 +416,7 @@ void FLIPSolver::solvePressure(float dt) {
         }
     }
 
-#pragma omp parallel for collapse(3) if(nCells > 1024)
+#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
     for (int i = 0; i < nx; ++i) {
         for (int j = 1; j < ny; ++j) {
             for (int k = 0; k < nz; ++k) {
@@ -365,7 +439,7 @@ void FLIPSolver::solvePressure(float dt) {
         }
     }
 
-#pragma omp parallel for collapse(3) if(nCells > 1024)
+#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
     for (int i = 0; i < nx; ++i) {
         for (int j = 0; j < ny; ++j) {
             for (int k = 1; k < nz; ++k) {
@@ -391,7 +465,7 @@ void FLIPSolver::solvePressure(float dt) {
 
 void FLIPSolver::applyGridBoundaryConditions() {
 
-#pragma omp parallel sections
+#pragma omp parallel sections if(mode != SimulationMode::SERIAL)
     {
 #pragma omp section
         {
@@ -432,7 +506,7 @@ void FLIPSolver::applyBoundaryConditions() {
     const float maxY = grid.getNy() * h;
     const float maxZ = grid.getNz() * h;
 
-#pragma omp parallel for if(particles.size() > 1024)
+#pragma omp parallel for schedule(static) if(mode != SimulationMode::SERIAL)
     for (int pIdx = 0; pIdx < static_cast<int>(particles.size()); ++pIdx) {
         auto& p = particles[pIdx];
 
@@ -478,7 +552,7 @@ void FLIPSolver::applyBoundaryConditions() {
 }
 
 void FLIPSolver::gridToParticles(const MACGrid& oldGrid, float dt) {
-#pragma omp parallel for if(particles.size() > 1024)
+#pragma omp parallel for schedule(static) if(mode != SimulationMode::SERIAL)
     for (int p = 0; p < static_cast<int>(particles.size()); ++p) {
         auto& particle = particles[p];
         const Vec3 picVel = sampleMAC(grid, particle.pos);
@@ -496,7 +570,7 @@ void FLIPSolver::advectParticles(float dt) {
     const float maxY = grid.getNy() * h;
     const float maxZ = grid.getNz() * h;
     // RK2 integration
-#pragma omp parallel for if(particles.size() > 1024)
+#pragma omp parallel for schedule(static) if(mode != SimulationMode::SERIAL)
     for (int p = 0; p < static_cast<int>(particles.size()); ++p) {
         float t = 0.0f;
 
@@ -597,4 +671,159 @@ Vec3 FLIPSolver::sampleMAC(const MACGrid& g, const Vec3& x) const {
     );
 
     return Vec3(u, v, w);
+}
+
+void FLIPSolver::sortParticles() {
+    if (particles.empty()) return;
+
+    const int nParticles = static_cast<int>(particles.size());
+    const int nCells = grid.getNx() * grid.getNy() * grid.getNz();
+    const float h = grid.getDims();
+
+    std::vector<int> cellCounts(nCells + 1, 0);
+    std::vector<int> particleCells(nParticles);
+
+    // 1. Count particles per cell
+#pragma omp parallel if(mode != SimulationMode::SERIAL)
+    {
+        std::vector<int> localCounts(nCells + 1, 0);
+#pragma omp for nowait
+        for (int i = 0; i < nParticles; ++i) {
+            int ix = std::clamp(static_cast<int>(particles[i].pos.x / h), 0, grid.getNx() - 1);
+            int iy = std::clamp(static_cast<int>(particles[i].pos.y / h), 0, grid.getNy() - 1);
+            int iz = std::clamp(static_cast<int>(particles[i].pos.z / h), 0, grid.getNz() - 1);
+            int cIdx = cellIndex(ix, iy, iz);
+            particleCells[i] = cIdx;
+            localCounts[cIdx]++;
+        }
+
+#pragma omp critical
+        {
+            for (int i = 0; i < nCells; ++i) {
+                cellCounts[i] += localCounts[i];
+            }
+        }
+    }
+
+    // 2. Compute prefix sums (offsets)
+    std::vector<int> offsets(nCells + 1);
+    offsets[0] = 0;
+    for (int i = 0; i < nCells; ++i) {
+        offsets[i + 1] = offsets[i] + cellCounts[i];
+    }
+
+    // 3. Reorder particles into a temporary buffer
+    std::vector<Particle> sortedParticles(nParticles);
+    std::vector<int> currentOffsets = offsets; // Copy to track insertion points
+
+    for (int i = 0; i < nParticles; ++i) {
+        int cIdx = particleCells[i];
+        int destIdx = currentOffsets[cIdx]++;
+        sortedParticles[destIdx] = particles[i];
+    }
+
+    particles.swap(sortedParticles);
+}
+
+void FLIPSolver::solvePressureRBGS(float dt) {
+    const int nx = grid.getNx();
+    const int ny = grid.getNy();
+    const int nz = grid.getNz();
+    const float h = grid.getDims();
+    const float safeDt = std::max(dt, 1e-6f);
+    const int nCells = nx * ny * nz;
+
+    grid.clearPressure();
+
+    for (int iter = 0; iter < pressureIterations; ++iter) {
+        for (int pass = 0; pass < 2; ++pass) {
+#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
+            for (int k = 0; k < nz; ++k) {
+                for (int j = 0; j < ny; ++j) {
+                    int i_start = (pass + j + k) % 2;
+                    for (int i = i_start; i < nx; i += 2) {
+                        const int idx = cellIndex(i, j, k);
+                        if (cellType[idx] != WATER) {
+                            grid.P(i, j, k) = 0.0f;
+                            continue;
+                        }
+
+                        const float rhs = (materialDensity / safeDt) * grid.divergence(i, j, k);
+
+                        float sum = 0.0f;
+                        int diag = 0;
+
+                        auto consider = [&](int ni, int nj, int nk) {
+                            if (!isValidCell(ni, nj, nk)) return;
+                            const CellType t = cellType[cellIndex(ni, nj, nk)];
+                            if (t == SOLID) return;
+
+                            ++diag;
+                            if (t == WATER) {
+                                sum += grid.P(ni, nj, nk);
+                            }
+                        };
+
+                        consider(i - 1, j, k);
+                        consider(i + 1, j, k);
+                        consider(i, j - 1, k);
+                        consider(i, j + 1, k);
+                        consider(i, j, k - 1);
+                        consider(i, j, k + 1);
+
+                        if (diag > 0) {
+                            grid.P(i, j, k) = (sum - rhs * h * h) / static_cast<float>(diag);
+                        } else {
+                            grid.P(i, j, k) = 0.0f;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
+    for (int i = 1; i < nx; ++i) {
+        for (int j = 0; j < ny; ++j) {
+            for (int k = 0; k < nz; ++k) {
+                const CellType leftType = cellType[cellIndex(i - 1, j, k)];
+                const CellType rightType = cellType[cellIndex(i, j, k)];
+                if (leftType == SOLID || rightType == SOLID) { grid.U(i, j, k) = 0.0f; continue; }
+                if (leftType == AIR && rightType == AIR) continue;
+                const float pL = (leftType == WATER) ? grid.P(i - 1, j, k) : 0.0f;
+                const float pR = (rightType == WATER) ? grid.P(i, j, k) : 0.0f;
+                grid.U(i, j, k) -= (safeDt / materialDensity) * (pR - pL) / h;
+            }
+        }
+    }
+
+#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
+    for (int i = 0; i < nx; ++i) {
+        for (int j = 1; j < ny; ++j) {
+            for (int k = 0; k < nz; ++k) {
+                const CellType downType = cellType[cellIndex(i, j - 1, k)];
+                const CellType upType = cellType[cellIndex(i, j, k)];
+                if (downType == SOLID || upType == SOLID) { grid.V(i, j, k) = 0.0f; continue; }
+                if (downType == AIR && upType == AIR) continue;
+                const float pD = (downType == WATER) ? grid.P(i, j - 1, k) : 0.0f;
+                const float pU = (upType == WATER) ? grid.P(i, j, k) : 0.0f;
+                grid.V(i, j, k) -= (safeDt / materialDensity) * (pU - pD) / h;
+            }
+        }
+    }
+
+#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
+    for (int i = 0; i < nx; ++i) {
+        for (int j = 0; j < ny; ++j) {
+            for (int k = 1; k < nz; ++k) {
+                const CellType backType = cellType[cellIndex(i, j, k - 1)];
+                const CellType frontType = cellType[cellIndex(i, j, k)];
+                if (backType == SOLID || frontType == SOLID) { grid.W(i, j, k) = 0.0f; continue; }
+                if (backType == AIR && frontType == AIR) continue;
+                const float pB = (backType == WATER) ? grid.P(i, j, k - 1) : 0.0f;
+                const float pF = (frontType == WATER) ? grid.P(i, j, k) : 0.0f;
+                grid.W(i, j, k) -= (safeDt / materialDensity) * (pF - pB) / h;
+            }
+        }
+    }
 }
