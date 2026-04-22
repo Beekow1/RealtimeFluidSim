@@ -204,7 +204,11 @@ void RealtimeFluidSim::setupCallbacks() {
 }
 
 void RealtimeFluidSim::mainLoop() {
-    float lastFrame = 0.0f;
+    float lastFrame = static_cast<float>(glfwGetTime());
+
+    double statsAccumTime = 0.0;
+    double statsAccumFrameTimeMs = 0.0;
+    int statsFrameCount = 0;
 
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = static_cast<float>(glfwGetTime());
@@ -247,6 +251,28 @@ void RealtimeFluidSim::mainLoop() {
 
         glfwSwapBuffers(window);
         glfwPollEvents();
+
+        // Frametime stats
+        const double frameTimeMs = static_cast<double>(deltaTime) * 1000.0;
+        statsAccumTime += static_cast<double>(deltaTime);
+        statsAccumFrameTimeMs += frameTimeMs;
+        ++statsFrameCount;
+
+        // Log once per second
+        if (statsAccumTime >= 1.0) {
+            const double avgFrameTimeMs = statsAccumFrameTimeMs / static_cast<double>(statsFrameCount);
+            const double avgFps = (avgFrameTimeMs > 0.0) ? (1000.0 / avgFrameTimeMs) : 0.0;
+
+            std::cout
+                << "Avg frametime: " << avgFrameTimeMs << " ms | "
+                << "Avg FPS: " << avgFps << " | "
+                << "Frames: " << statsFrameCount
+                << '\n';
+
+            statsAccumTime = 0.0;
+            statsAccumFrameTimeMs = 0.0;
+            statsFrameCount = 0;
+        }
     }
 }
 

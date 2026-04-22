@@ -26,6 +26,8 @@ public:
     void setMaterialDensity(float density);
     void setFlipRatio(float ratio);
     void setPressureIterations(int iterations);
+    void setPressureTolerance(float tolerance);
+
 
     int getNx() const noexcept { return nx; }
     int getNy() const noexcept { return ny; }
@@ -35,6 +37,7 @@ public:
 private:
     struct Impl;
 
+    float pressureTolerance;
     int nx;
     int ny;
     int nz;
@@ -46,4 +49,5 @@ private:
 
     std::vector<Particle> particles;
     std::unique_ptr<Impl> impl;
+
 };
