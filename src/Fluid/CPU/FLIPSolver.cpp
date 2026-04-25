@@ -209,9 +209,9 @@ void FLIPSolver::particlesToGrid() {
                         float weight = trilinearWeight(fx, fy, fz, di, dj, dk);
                         float val = weight * particle.vel.x;
                         if (mode != SimulationMode::SERIAL) {
-#pragma omp atomic
+
                             grid.U(ui, uj, uk) += val;
-#pragma omp atomic
+
                             grid.getWeightU(ui, uj, uk) += weight;
                         } else {
                             grid.U(ui, uj, uk) += val;
@@ -237,9 +237,9 @@ void FLIPSolver::particlesToGrid() {
                         float weight = trilinearWeight(fx, fy, fz, di, dj, dk);
                         float val = weight * particle.vel.y;
                         if (mode != SimulationMode::SERIAL) {
-#pragma omp atomic
+
                             grid.V(vi, vj, vk) += val;
-#pragma omp atomic
+
                             grid.getWeightV(vi, vj, vk) += weight;
                         } else {
                             grid.V(vi, vj, vk) += val;
@@ -265,9 +265,9 @@ void FLIPSolver::particlesToGrid() {
                         float weight = trilinearWeight(fx, fy, fz, di, dj, dk);
                         float val = weight * particle.vel.z;
                         if (mode != SimulationMode::SERIAL) {
-#pragma omp atomic
+
                             grid.W(wi, wj, wk) += val;
-#pragma omp atomic
+
                             grid.getWeightW(wi, wj, wk) += weight;
                         } else {
                             grid.W(wi, wj, wk) += val;
