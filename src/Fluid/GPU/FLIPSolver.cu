@@ -41,7 +41,7 @@ namespace {
         float* __restrict__ weightW;
     };
 
-	__host__ __device__ inline int cellIndex(int i, int j, int k, int nx, int ny) {
+    __host__ __device__ inline int cellIndex(int i, int j, int k, int nx, int ny) {
         return i + nx * (j + ny * k);
     }
 
@@ -115,14 +115,14 @@ namespace {
 
         float value = 0.0f;
 
-#define ACCUM_SAMPLE(di, dj, dk)                                                                      \
-    do {                                                                                              \
-        const int ii = i + (di);                                                                      \
-        const int jj = j + (dj);                                                                      \
-        const int kk = k + (dk);                                                                      \
-        if (ii >= 0 && ii <= maxI && jj >= 0 && jj <= maxJ && kk >= 0 && kk <= maxK) {              \
+#define ACCUM_SAMPLE(di, dj, dk)\
+    do {\
+        const int ii = i + (di);\
+        const int jj = j + (dj); \
+        const int kk = k + (dk); \
+        if (ii >= 0 && ii <= maxI && jj >= 0 && jj <= maxJ && kk >= 0 && kk <= maxK) { \
             value += trilinearWeight(fx, fy, fz, di, dj, dk) * componentAt(g, component, ii, jj, kk);\
-        }                                                                                             \
+        } \
     } while (0)
 
         ACCUM_SAMPLE(0, 0, 0);
@@ -263,13 +263,10 @@ namespace {
         }
     }
 
-    __global__ void copyFacesKernel(const float* __restrict__ src, float* __restrict__ dst, int count) {
-        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < count) dst[idx] = src[idx];
-    }
 
-    __global__ void finalizeUKernel(
+    __global__ void finalizeCopyUKernel(
         float* __restrict__ u,
+        float* __restrict__ uPrev,
         const float* __restrict__ weightU,
         int nx,
         int ny,
@@ -280,38 +277,48 @@ namespace {
         if (idx >= count) return;
 
         float value = u[idx];
-        const float w = weightU[idx];
-        if (w > 0.0f) value /= w;
+        const float weight = weightU[idx];
+        if (weight > 0.0f) value /= weight;
 
         const int i = idx % (nx + 1);
         if (i == 0 || i == nx) value = 0.0f;
 
+        uPrev[idx] = value;
         u[idx] = value;
     }
 
-    __global__ void finalizeVKernel(
+    __global__ void finalizeCopyVApplyGravityKernel(
         float* __restrict__ v,
+        float* __restrict__ vPrev,
         const float* __restrict__ weightV,
         int nx,
         int ny,
-        int nz)
+        int nz,
+        float dt)
     {
         const int idx = blockIdx.x * blockDim.x + threadIdx.x;
         const int count = nx * (ny + 1) * nz;
         if (idx >= count) return;
 
         float value = v[idx];
-        const float w = weightV[idx];
-        if (w > 0.0f) value /= w;
+        const float weight = weightV[idx];
+        if (weight > 0.0f) value /= weight;
 
         const int j = (idx / nx) % (ny + 1);
-        if (j == 0 || j == ny) value = 0.0f;
+        const bool boundary = (j == 0 || j == ny);
+        if (boundary) value = 0.0f;
+        vPrev[idx] = value;
+
+        if (!boundary) {
+            value += -9.81f * dt;
+        }
 
         v[idx] = value;
     }
 
-    __global__ void finalizeWKernel(
+    __global__ void finalizeCopyWKernel(
         float* __restrict__ w,
+        float* __restrict__ wPrev,
         const float* __restrict__ weightW,
         int nx,
         int ny,
@@ -322,44 +329,14 @@ namespace {
         if (idx >= count) return;
 
         float value = w[idx];
-        const float ww = weightW[idx];
-        if (ww > 0.0f) value /= ww;
+        const float weight = weightW[idx];
+        if (weight > 0.0f) value /= weight;
 
         const int k = idx / (nx * ny);
         if (k == 0 || k == nz) value = 0.0f;
 
+        wPrev[idx] = value;
         w[idx] = value;
-    }
-
-    __global__ void addGravityKernel(float* v, int nx, int ny, int nz, float dt) {
-        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-        const int count = nx * (ny + 1) * nz;
-        if (idx >= count) return;
-        v[idx] += -9.81f * dt;
-    }
-
-    __global__ void enforceUBoundaryKernel(float* u, int nx, int ny, int nz) {
-        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-        const int count = (nx + 1) * ny * nz;
-        if (idx >= count) return;
-        const int i = idx % (nx + 1);
-        if (i == 0 || i == nx) u[idx] = 0.0f;
-    }
-
-    __global__ void enforceVBoundaryKernel(float* v, int nx, int ny, int nz) {
-        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-        const int count = nx * (ny + 1) * nz;
-        if (idx >= count) return;
-        const int j = (idx / nx) % (ny + 1);
-        if (j == 0 || j == ny) v[idx] = 0.0f;
-    }
-
-    __global__ void enforceWBoundaryKernel(float* w, int nx, int ny, int nz) {
-        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-        const int count = nx * ny * (nz + 1);
-        if (idx >= count) return;
-        const int k = idx / (nx * ny);
-        if (k == 0 || k == nz) w[idx] = 0.0f;
     }
 
 
@@ -418,137 +395,6 @@ namespace {
         diagInv[idx] = (diag > 0) ? (1.0f / static_cast<float>(diag)) : 0.0f;
     }
 
-    __global__ void applyPressureMatrixKernel(
-        int nx,
-        int ny,
-        int nz,
-        const std::uint8_t* __restrict__ cellType,
-        const float* __restrict__ x,
-        float* __restrict__ y)
-    {
-        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-        const int nCells = nx * ny * nz;
-        if (idx >= nCells) return;
-
-        if (cellType[idx] != WATER_GPU) {
-            y[idx] = 0.0f;
-            return;
-        }
-
-        const int i = idx % nx;
-        const int j = (idx / nx) % ny;
-        const int k = idx / (nx * ny);
-
-        float result = 0.0f;
-        int diag = 0;
-
-        if (i - 1 >= 0) {
-            const int nidx = cellIndex(i - 1, j, k, nx, ny);
-            const std::uint8_t t = cellType[nidx];
-            if (t != SOLID_GPU) {
-                ++diag;
-                if (t == WATER_GPU) result -= x[nidx];
-            }
-        }
-        if (i + 1 < nx) {
-            const int nidx = cellIndex(i + 1, j, k, nx, ny);
-            const std::uint8_t t = cellType[nidx];
-            if (t != SOLID_GPU) {
-                ++diag;
-                if (t == WATER_GPU) result -= x[nidx];
-            }
-        }
-        if (j - 1 >= 0) {
-            const int nidx = cellIndex(i, j - 1, k, nx, ny);
-            const std::uint8_t t = cellType[nidx];
-            if (t != SOLID_GPU) {
-                ++diag;
-                if (t == WATER_GPU) result -= x[nidx];
-            }
-        }
-        if (j + 1 < ny) {
-            const int nidx = cellIndex(i, j + 1, k, nx, ny);
-            const std::uint8_t t = cellType[nidx];
-            if (t != SOLID_GPU) {
-                ++diag;
-                if (t == WATER_GPU) result -= x[nidx];
-            }
-        }
-        if (k - 1 >= 0) {
-            const int nidx = cellIndex(i, j, k - 1, nx, ny);
-            const std::uint8_t t = cellType[nidx];
-            if (t != SOLID_GPU) {
-                ++diag;
-                if (t == WATER_GPU) result -= x[nidx];
-            }
-        }
-        if (k + 1 < nz) {
-            const int nidx = cellIndex(i, j, k + 1, nx, ny);
-            const std::uint8_t t = cellType[nidx];
-            if (t != SOLID_GPU) {
-                ++diag;
-                if (t == WATER_GPU) result -= x[nidx];
-            }
-        }
-
-        y[idx] = static_cast<float>(diag) * x[idx] + result;
-    }
-
-    __global__ void initializePCGKernel(
-        const std::uint8_t* __restrict__ cellType,
-        const float* __restrict__ rhs,
-        const float* __restrict__ diagInv,
-        float* __restrict__ pressure,
-        float* __restrict__ residual,
-        float* __restrict__ z,
-        float* __restrict__ search,
-        int nCells)
-    {
-        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx >= nCells) return;
-
-        if (cellType[idx] != WATER_GPU) {
-            pressure[idx] = 0.0f;
-            residual[idx] = 0.0f;
-            z[idx] = 0.0f;
-            search[idx] = 0.0f;
-            return;
-        }
-
-        pressure[idx] = 0.0f;
-        residual[idx] = rhs[idx];
-        z[idx] = diagInv[idx] * residual[idx];
-        search[idx] = z[idx];
-    }
-
-    __global__ void applyDiagonalPreconditionerKernel(
-        const std::uint8_t* __restrict__ cellType,
-        const float* __restrict__ diagInv,
-        const float* __restrict__ residual,
-        float* __restrict__ z,
-        int nCells)
-    {
-        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx >= nCells) return;
-        z[idx] = (cellType[idx] == WATER_GPU) ? (diagInv[idx] * residual[idx]) : 0.0f;
-    }
-
-    __global__ void updatePressureAndResidualKernel(
-        const std::uint8_t* __restrict__ cellType,
-        float* __restrict__ pressure,
-        float* __restrict__ residual,
-        const float* __restrict__ search,
-        const float* __restrict__ Ap,
-        float alpha,
-        int nCells)
-    {
-        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx >= nCells || cellType[idx] != WATER_GPU) return;
-
-        pressure[idx] += alpha * search[idx];
-        residual[idx] -= alpha * Ap[idx];
-    }
-
     __global__ void updateSearchDirectionKernel(
         const std::uint8_t* __restrict__ cellType,
         float* __restrict__ search,
@@ -560,38 +406,6 @@ namespace {
         if (idx >= nCells || cellType[idx] != WATER_GPU) return;
 
         search[idx] = z[idx] + beta * search[idx];
-    }
-
-    __global__ void dotProductKernel(
-        const std::uint8_t* __restrict__ cellType,
-        const float* __restrict__ a,
-        const float* __restrict__ b,
-        float* __restrict__ partial,
-        int nCells)
-    {
-        __shared__ float sdata[256];
-
-        const int tid = threadIdx.x;
-        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-        float val = 0.0f;
-        if (idx < nCells&& cellType[idx] == WATER_GPU) {
-            val = a[idx] * b[idx];
-        }
-
-        sdata[tid] = val;
-        __syncthreads();
-
-        for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-            if (tid < stride) {
-                sdata[tid] += sdata[tid + stride];
-            }
-            __syncthreads();
-        }
-
-        if (tid == 0) {
-            partial[blockIdx.x] = sdata[0];
-        }
     }
 
     __global__ void reducePartialSumsKernel(
@@ -619,49 +433,242 @@ namespace {
         }
     }
 
-    __global__ void gridToParticlesKernel(
+
+    __global__ void initializePCGAndDotKernel(
+        const std::uint8_t* __restrict__ cellType,
+        const float* __restrict__ rhs,
+        const float* __restrict__ diagInv,
+        float* __restrict__ pressure,
+        float* __restrict__ residual,
+        float* __restrict__ z,
+        float* __restrict__ search,
+        float* __restrict__ partial,
+        int nCells)
+    {
+        __shared__ float sdata[256];
+
+        const int tid = threadIdx.x;
+        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+        float dotVal = 0.0f;
+        if (idx < nCells) {
+            if (cellType[idx] == WATER_GPU) {
+                const float r = rhs[idx];
+                const float zi = diagInv[idx] * r;
+                pressure[idx] = 0.0f;
+                residual[idx] = r;
+                z[idx] = zi;
+                search[idx] = zi;
+                dotVal = r * zi;
+            }
+            else {
+                pressure[idx] = 0.0f;
+                residual[idx] = 0.0f;
+                z[idx] = 0.0f;
+                search[idx] = 0.0f;
+            }
+        }
+
+        sdata[tid] = dotVal;
+        __syncthreads();
+
+        for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                sdata[tid] += sdata[tid + stride];
+            }
+            __syncthreads();
+        }
+
+        if (tid == 0) {
+            partial[blockIdx.x] = sdata[0];
+        }
+    }
+
+    __global__ void applyPressureMatrixAndDotKernel(
+        int nx,
+        int ny,
+        int nz,
+        const std::uint8_t* __restrict__ cellType,
+        const float* __restrict__ x,
+        float* __restrict__ y,
+        float* __restrict__ partial)
+    {
+        __shared__ float sdata[256];
+
+        const int tid = threadIdx.x;
+        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        const int nCells = nx * ny * nz;
+
+        float dotVal = 0.0f;
+
+        if (idx < nCells) {
+            if (cellType[idx] != WATER_GPU) {
+                y[idx] = 0.0f;
+            }
+            else {
+                const int i = idx % nx;
+                const int j = (idx / nx) % ny;
+                const int k = idx / (nx * ny);
+
+                float result = 0.0f;
+                int diag = 0;
+
+                if (i - 1 >= 0) {
+                    const int nidx = cellIndex(i - 1, j, k, nx, ny);
+                    const std::uint8_t t = cellType[nidx];
+                    if (t != SOLID_GPU) {
+                        ++diag;
+                        if (t == WATER_GPU) result -= x[nidx];
+                    }
+                }
+                if (i + 1 < nx) {
+                    const int nidx = cellIndex(i + 1, j, k, nx, ny);
+                    const std::uint8_t t = cellType[nidx];
+                    if (t != SOLID_GPU) {
+                        ++diag;
+                        if (t == WATER_GPU) result -= x[nidx];
+                    }
+                }
+                if (j - 1 >= 0) {
+                    const int nidx = cellIndex(i, j - 1, k, nx, ny);
+                    const std::uint8_t t = cellType[nidx];
+                    if (t != SOLID_GPU) {
+                        ++diag;
+                        if (t == WATER_GPU) result -= x[nidx];
+                    }
+                }
+                if (j + 1 < ny) {
+                    const int nidx = cellIndex(i, j + 1, k, nx, ny);
+                    const std::uint8_t t = cellType[nidx];
+                    if (t != SOLID_GPU) {
+                        ++diag;
+                        if (t == WATER_GPU) result -= x[nidx];
+                    }
+                }
+                if (k - 1 >= 0) {
+                    const int nidx = cellIndex(i, j, k - 1, nx, ny);
+                    const std::uint8_t t = cellType[nidx];
+                    if (t != SOLID_GPU) {
+                        ++diag;
+                        if (t == WATER_GPU) result -= x[nidx];
+                    }
+                }
+                if (k + 1 < nz) {
+                    const int nidx = cellIndex(i, j, k + 1, nx, ny);
+                    const std::uint8_t t = cellType[nidx];
+                    if (t != SOLID_GPU) {
+                        ++diag;
+                        if (t == WATER_GPU) result -= x[nidx];
+                    }
+                }
+
+                const float Ax = static_cast<float>(diag) * x[idx] + result;
+                y[idx] = Ax;
+                dotVal = x[idx] * Ax;
+            }
+        }
+
+        sdata[tid] = dotVal;
+        __syncthreads();
+
+        for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                sdata[tid] += sdata[tid + stride];
+            }
+            __syncthreads();
+        }
+
+        if (tid == 0) {
+            partial[blockIdx.x] = sdata[0];
+        }
+    }
+
+    __global__ void updatePressureResidualZAndDotKernel(
+        const std::uint8_t* __restrict__ cellType,
+        float* __restrict__ pressure,
+        float* __restrict__ residual,
+        float* __restrict__ z,
+        const float* __restrict__ search,
+        const float* __restrict__ Ap,
+        const float* __restrict__ diagInv,
+        float alpha,
+        float* __restrict__ partial,
+        int nCells)
+    {
+        __shared__ float sdata[256];
+
+        const int tid = threadIdx.x;
+        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+        float dotVal = 0.0f;
+        if (idx < nCells&& cellType[idx] == WATER_GPU) {
+            pressure[idx] += alpha * search[idx];
+
+            const float r = residual[idx] - alpha * Ap[idx];
+            residual[idx] = r;
+
+            const float zi = diagInv[idx] * r;
+            z[idx] = zi;
+
+            dotVal = r * zi;
+        }
+
+        sdata[tid] = dotVal;
+        __syncthreads();
+
+        for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                sdata[tid] += sdata[tid + stride];
+            }
+            __syncthreads();
+        }
+
+        if (tid == 0) {
+            partial[blockIdx.x] = sdata[0];
+        }
+    }
+
+
+    __global__ void gridToParticlesAdvectBoundaryKernel(
         DeviceGrid currentGrid,
         DeviceGrid oldGrid,
-        const float4* __restrict__ pos,
+        float4* __restrict__ pos,
         float4* __restrict__ vel,
         int particleCount,
-        float flipRatio)
+        float flipRatio,
+        float dt)
     {
         const int p = blockIdx.x * blockDim.x + threadIdx.x;
         if (p >= particleCount) return;
 
-        const float3 x = make_float3(pos[p].x, pos[p].y, pos[p].z);
-        const float3 currentVel = sampleMAC(currentGrid, x);
-        const float3 oldVel = sampleMAC(oldGrid, x);
-        const float3 particleVel = make_float3(vel[p].x, vel[p].y, vel[p].z);
-
-        const float3 flipDelta = sub3(currentVel, oldVel);
-        const float3 flipVel = add3(particleVel, flipDelta);
-        const float3 blended = add3(scale3(flipVel, flipRatio), scale3(currentVel, 1.0f - flipRatio));
-
-        vel[p] = make_float4(blended.x, blended.y, blended.z, 0.0f);
-    }
-
-    __global__ void advectParticlesKernel(DeviceGrid g, float4* pos, int particleCount, float dt) {
-        const int p = blockIdx.x * blockDim.x + threadIdx.x;
-        if (p >= particleCount) return;
-
-        const float h = g.h;
+        const float h = currentGrid.h;
         const float eps = 0.05f * h;
-        const float maxX = g.nx * h;
-        const float maxY = g.ny * h;
-        const float maxZ = g.nz * h;
+        const float maxX = currentGrid.nx * h;
+        const float maxY = currentGrid.ny * h;
+        const float maxZ = currentGrid.nz * h;
 
         float3 x = make_float3(pos[p].x, pos[p].y, pos[p].z);
-        float t = 0.0f;
+        const float3 particleVel = make_float3(vel[p].x, vel[p].y, vel[p].z);
 
+        const float3 currentVel = sampleMAC(currentGrid, x);
+        const float3 oldVel = sampleMAC(oldGrid, x);
+        const float3 flipDelta = sub3(currentVel, oldVel);
+        const float3 flipVel = add3(particleVel, flipDelta);
+        float3 newVel = add3(
+            scale3(flipVel, flipRatio),
+            scale3(currentVel, 1.0f - flipRatio));
+
+        float t = 0.0f;
         while (t < dt) {
-            const float3 v0 = sampleMAC(g, x);
+            const float3 v0 = sampleMAC(currentGrid, x);
             const float speed = length3(v0);
-            const float subDt = (speed > 1e-6f) ? fminf(dt - t, 0.9f * h / speed) : (dt - t);
+            const float subDt =
+                (speed > 1e-6f)
+                ? fminf(dt - t, 0.9f * h / speed)
+                : (dt - t);
 
             const float3 midPos = add3(x, scale3(v0, 0.5f * subDt));
-            const float3 vMid = sampleMAC(g, midPos);
+            const float3 vMid = sampleMAC(currentGrid, midPos);
             x = add3(x, scale3(vMid, subDt));
             t += subDt;
 
@@ -670,70 +677,47 @@ namespace {
             x.z = clampf(x.z, eps, maxZ - eps);
         }
 
-        pos[p] = make_float4(x.x, x.y, x.z, 0.0f);
-    }
-
-    __global__ void applyParticleBoundaryKernel(
-        float4* pos,
-        float4* vel,
-        int particleCount,
-        int nx,
-        int ny,
-        int nz,
-        float h)
-    {
-        const int p = blockIdx.x * blockDim.x + threadIdx.x;
-        if (p >= particleCount) return;
-
-        const float eps = 0.05f * h;
-        const float maxX = nx * h;
-        const float maxY = ny * h;
-        const float maxZ = nz * h;
-
-        float4 x = pos[p];
-        float4 v = vel[p];
-
         if (x.x < eps) {
             x.x = eps;
-            if (v.x < 0.0f) v.x = 0.0f;
-            v.y = 0.0f;
-            v.z = 0.0f;
+            if (newVel.x < 0.0f) newVel.x = 0.0f;
+            newVel.y = 0.0f;
+            newVel.z = 0.0f;
         }
         else if (x.x > maxX - eps) {
             x.x = maxX - eps;
-            if (v.x > 0.0f) v.x = 0.0f;
-            v.y = 0.0f;
-            v.z = 0.0f;
+            if (newVel.x > 0.0f) newVel.x = 0.0f;
+            newVel.y = 0.0f;
+            newVel.z = 0.0f;
         }
 
         if (x.y < eps) {
             x.y = eps;
-            if (v.y < 0.0f) v.y = 0.0f;
-            v.x = 0.0f;
-            v.z = 0.0f;
+            if (newVel.y < 0.0f) newVel.y = 0.0f;
+            newVel.x = 0.0f;
+            newVel.z = 0.0f;
         }
         else if (x.y > maxY - eps) {
             x.y = maxY - eps;
-            if (v.y > 0.0f) v.y = 0.0f;
-            v.x = 0.0f;
-            v.z = 0.0f;
+            if (newVel.y > 0.0f) newVel.y = 0.0f;
+            newVel.x = 0.0f;
+            newVel.z = 0.0f;
         }
 
         if (x.z < eps) {
             x.z = eps;
-            if (v.z < 0.0f) v.z = 0.0f;
-            v.x = 0.0f;
-            v.y = 0.0f;
+            if (newVel.z < 0.0f) newVel.z = 0.0f;
+            newVel.x = 0.0f;
+            newVel.y = 0.0f;
         }
         else if (x.z > maxZ - eps) {
             x.z = maxZ - eps;
-            if (v.z > 0.0f) v.z = 0.0f;
-            v.x = 0.0f;
-            v.y = 0.0f;
+            if (newVel.z > 0.0f) newVel.z = 0.0f;
+            newVel.x = 0.0f;
+            newVel.y = 0.0f;
         }
 
-        pos[p] = x;
-        vel[p] = v;
+        pos[p] = make_float4(x.x, x.y, x.z, 0.0f);
+        vel[p] = make_float4(newVel.x, newVel.y, newVel.z, 0.0f);
     }
 
     inline int divUp(int n, int d) {
@@ -884,8 +868,6 @@ struct FLIPSolver::Impl {
     float* d_weightW = nullptr;
 
     float* d_pOld = nullptr;
-    float* d_pNew = nullptr; 
-
 
     std::uint8_t* d_cellType = nullptr;
 
@@ -893,6 +875,10 @@ struct FLIPSolver::Impl {
     float4* d_vel = nullptr;
     int particleCapacity = 0;
     int deviceParticleCount = 0;
+
+    float4* h_posPinned = nullptr;
+    float4* h_velPinned = nullptr;
+    int hostParticleCapacity = 0;
 
     float* d_rhs = nullptr;
     float* d_residual = nullptr;
@@ -931,7 +917,6 @@ struct FLIPSolver::Impl {
         CUDA_CHECK(cudaMalloc(&d_weightW, sizeof(float) * wCount));
 
         CUDA_CHECK(cudaMalloc(&d_pOld, sizeof(float) * cellCount));
-        CUDA_CHECK(cudaMalloc(&d_pNew, sizeof(float) * cellCount));
         CUDA_CHECK(cudaMalloc(&d_cellType, sizeof(std::uint8_t) * cellCount));
 
         CUDA_CHECK(cudaMalloc(&d_rhs, sizeof(float) * cellCount));
@@ -956,7 +941,6 @@ struct FLIPSolver::Impl {
         cudaFree(d_weightV);
         cudaFree(d_weightW);
         cudaFree(d_pOld);
-        cudaFree(d_pNew);
         cudaFree(d_cellType);
         cudaFree(d_pos);
         cudaFree(d_vel);
@@ -968,6 +952,9 @@ struct FLIPSolver::Impl {
         cudaFree(d_Ap);
         cudaFree(d_diagInv);
         cudaFree(d_reduceBuffer);
+
+        if (h_posPinned) cudaFreeHost(h_posPinned);
+        if (h_velPinned) cudaFreeHost(h_velPinned);
 
         if (stream) cudaStreamDestroy(stream);
     }
@@ -983,6 +970,20 @@ struct FLIPSolver::Impl {
         particleCapacity = std::max(count, std::max(1024, particleCapacity * 2));
         CUDA_CHECK(cudaMalloc(&d_pos, sizeof(float4) * particleCapacity));
         CUDA_CHECK(cudaMalloc(&d_vel, sizeof(float4) * particleCapacity));
+    }
+
+
+    void ensurePinnedHostCapacity(int count) {
+        if (count <= hostParticleCapacity) return;
+
+        if (h_posPinned) cudaFreeHost(h_posPinned);
+        if (h_velPinned) cudaFreeHost(h_velPinned);
+        h_posPinned = nullptr;
+        h_velPinned = nullptr;
+
+        hostParticleCapacity = std::max(count, std::max(1024, hostParticleCapacity * 2));
+        CUDA_CHECK(cudaMallocHost(&h_posPinned, sizeof(float4) * hostParticleCapacity));
+        CUDA_CHECK(cudaMallocHost(&h_velPinned, sizeof(float4) * hostParticleCapacity));
     }
 
     DeviceGrid currentGrid() const {
@@ -1020,43 +1021,43 @@ struct FLIPSolver::Impl {
             return;
         }
 
-        ensureParticleCapacity(static_cast<int>(particles.size()));
+        const int count = static_cast<int>(particles.size());
+        ensureParticleCapacity(count);
+        ensurePinnedHostCapacity(count);
 
-        std::vector<float4> hostPos(particles.size());
-        std::vector<float4> hostVel(particles.size());
         for (std::size_t i = 0; i < particles.size(); ++i) {
-            hostPos[i] = make_float4(particles[i].pos.x, particles[i].pos.y, particles[i].pos.z, 0.0f);
-            hostVel[i] = make_float4(particles[i].vel.x, particles[i].vel.y, particles[i].vel.z, 0.0f);
+            h_posPinned[i] = make_float4(particles[i].pos.x, particles[i].pos.y, particles[i].pos.z, 0.0f);
+            h_velPinned[i] = make_float4(particles[i].vel.x, particles[i].vel.y, particles[i].vel.z, 0.0f);
         }
 
         CUDA_CHECK(cudaMemcpyAsync(
             d_pos,
-            hostPos.data(),
+            h_posPinned,
             sizeof(float4) * particles.size(),
             cudaMemcpyHostToDevice,
             stream));
         CUDA_CHECK(cudaMemcpyAsync(
             d_vel,
-            hostVel.data(),
+            h_velPinned,
             sizeof(float4) * particles.size(),
             cudaMemcpyHostToDevice,
             stream));
 
-        deviceParticleCount = static_cast<int>(particles.size());
+        deviceParticleCount = count;
     }
 
     void downloadParticles(std::vector<Particle>& particles) {
-        std::vector<float4> hostPos(particles.size());
-        std::vector<float4> hostVel(particles.size());
+        const int count = static_cast<int>(particles.size());
+        ensurePinnedHostCapacity(count);
 
         CUDA_CHECK(cudaMemcpyAsync(
-            hostPos.data(),
+            h_posPinned,
             d_pos,
             sizeof(float4) * particles.size(),
             cudaMemcpyDeviceToHost,
             stream));
         CUDA_CHECK(cudaMemcpyAsync(
-            hostVel.data(),
+            h_velPinned,
             d_vel,
             sizeof(float4) * particles.size(),
             cudaMemcpyDeviceToHost,
@@ -1064,23 +1065,15 @@ struct FLIPSolver::Impl {
         CUDA_CHECK(cudaStreamSynchronize(stream));
 
         for (std::size_t i = 0; i < particles.size(); ++i) {
-            particles[i].pos = Vec3(hostPos[i].x, hostPos[i].y, hostPos[i].z);
-            particles[i].vel = Vec3(hostVel[i].x, hostVel[i].y, hostVel[i].z);
+            particles[i].pos = Vec3(h_posPinned[i].x, h_posPinned[i].y, h_posPinned[i].z);
+            particles[i].vel = Vec3(h_velPinned[i].x, h_velPinned[i].y, h_velPinned[i].z);
         }
     }
 
-    float dotWaterMasked(
-        const std::uint8_t* cellType,
-        const float* a,
-        const float* b) const
-    {
+
+    float finishReductionFromPartials(int count) const {
         constexpr int threads = 256;
-        int blocks = divUp(cellCount, threads);
 
-        dotProductKernel << <blocks, threads, 0, stream >> > (
-            cellType, a, b, d_reduceBuffer, cellCount);
-
-        int count = blocks;
         while (count > 1) {
             const int reduceBlocks = divUp(count, threads);
             reducePartialSumsKernel << <reduceBlocks, threads, 0, stream >> > (
@@ -1113,7 +1106,7 @@ struct FLIPSolver::Impl {
             density,
             dt);
 
-        initializePCGKernel << <blocks, threads, 0, stream >> > (
+        initializePCGAndDotKernel << <blocks, threads, 0, stream >> > (
             d_cellType,
             d_rhs,
             d_diagInv,
@@ -1121,9 +1114,10 @@ struct FLIPSolver::Impl {
             d_residual,
             d_z,
             d_search,
+            d_reduceBuffer,
             cellCount);
 
-        float rzOld = dotWaterMasked(d_cellType, d_residual, d_z);
+        float rzOld = finishReductionFromPartials(blocks);
         if (rzOld <= 1e-20f) {
             CUDA_CHECK(cudaMemsetAsync(d_pOld, 0, sizeof(float) * cellCount, stream));
             return;
@@ -1132,33 +1126,35 @@ struct FLIPSolver::Impl {
         const float tol2 = tolerance * tolerance;
 
         for (int iter = 0; iter < maxIterations; ++iter) {
-            applyPressureMatrixKernel << <blocks, threads, 0, stream >> > (
-                nx, ny, nz, d_cellType, d_search, d_Ap);
+            applyPressureMatrixAndDotKernel << <blocks, threads, 0, stream >> > (
+                nx,
+                ny,
+                nz,
+                d_cellType,
+                d_search,
+                d_Ap,
+                d_reduceBuffer);
 
-            const float pAp = dotWaterMasked(d_cellType, d_search, d_Ap);
+            const float pAp = finishReductionFromPartials(blocks);
             if (std::fabs(pAp) <= 1e-20f) {
                 break;
             }
 
             const float alpha = rzOld / pAp;
 
-            updatePressureAndResidualKernel << <blocks, threads, 0, stream >> > (
+            updatePressureResidualZAndDotKernel << <blocks, threads, 0, stream >> > (
                 d_cellType,
                 d_pOld,
                 d_residual,
+                d_z,
                 d_search,
                 d_Ap,
-                alpha,
-                cellCount);
-
-            applyDiagonalPreconditionerKernel << <blocks, threads, 0, stream >> > (
-                d_cellType,
                 d_diagInv,
-                d_residual,
-                d_z,
+                alpha,
+                d_reduceBuffer,
                 cellCount);
 
-            const float rzNew = dotWaterMasked(d_cellType, d_residual, d_z);
+            const float rzNew = finishReductionFromPartials(blocks);
             if (rzNew < tol2) {
                 break;
             }
@@ -1263,29 +1259,28 @@ void FLIPSolver::step(float dt) {
             impl->d_vel,
             particleCount);
 
-        finalizeUKernel << <divUp(impl->uCount, threads), threads, 0, impl->stream >> > (
-            impl->d_u, impl->d_weightU, nx, ny, nz);
-        finalizeVKernel << <divUp(impl->vCount, threads), threads, 0, impl->stream >> > (
-            impl->d_v, impl->d_weightV, nx, ny, nz);
-        finalizeWKernel << <divUp(impl->wCount, threads), threads, 0, impl->stream >> > (
-            impl->d_w, impl->d_weightW, nx, ny, nz);
-
-        copyFacesKernel << <divUp(impl->uCount, threads), threads, 0, impl->stream >> > (
-            impl->d_u, impl->d_uPrev, impl->uCount);
-        copyFacesKernel << <divUp(impl->vCount, threads), threads, 0, impl->stream >> > (
-            impl->d_v, impl->d_vPrev, impl->vCount);
-        copyFacesKernel << <divUp(impl->wCount, threads), threads, 0, impl->stream >> > (
-            impl->d_w, impl->d_wPrev, impl->wCount);
-
-        addGravityKernel << <divUp(impl->vCount, threads), threads, 0, impl->stream >> > (
-            impl->d_v, nx, ny, nz, subDt);
-
-        enforceUBoundaryKernel << <divUp(impl->uCount, threads), threads, 0, impl->stream >> > (
-            impl->d_u, nx, ny, nz);
-        enforceVBoundaryKernel << <divUp(impl->vCount, threads), threads, 0, impl->stream >> > (
-            impl->d_v, nx, ny, nz);
-        enforceWBoundaryKernel << <divUp(impl->wCount, threads), threads, 0, impl->stream >> > (
-            impl->d_w, nx, ny, nz);
+        finalizeCopyUKernel << <divUp(impl->uCount, threads), threads, 0, impl->stream >> > (
+            impl->d_u,
+            impl->d_uPrev,
+            impl->d_weightU,
+            nx,
+            ny,
+            nz);
+        finalizeCopyVApplyGravityKernel << <divUp(impl->vCount, threads), threads, 0, impl->stream >> > (
+            impl->d_v,
+            impl->d_vPrev,
+            impl->d_weightV,
+            nx,
+            ny,
+            nz,
+            subDt);
+        finalizeCopyWKernel << <divUp(impl->wCount, threads), threads, 0, impl->stream >> > (
+            impl->d_w,
+            impl->d_wPrev,
+            impl->d_weightW,
+            nx,
+            ny,
+            nz);
 
         impl->solvePressurePCG(materialDensity, subDt, pressureIterations, pressureTolerance);
 
@@ -1326,37 +1321,17 @@ void FLIPSolver::step(float dt) {
                 impl->d_pOld);
         }
 
-        enforceUBoundaryKernel << <divUp(impl->uCount, threads), threads, 0, impl->stream >> > (
-            impl->d_u, nx, ny, nz);
-        enforceVBoundaryKernel << <divUp(impl->vCount, threads), threads, 0, impl->stream >> > (
-            impl->d_v, nx, ny, nz);
-        enforceWBoundaryKernel << <divUp(impl->wCount, threads), threads, 0, impl->stream >> > (
-            impl->d_w, nx, ny, nz);
-
-        gridToParticlesKernel << <particleBlocks, threads, 0, impl->stream >> > (
+        gridToParticlesAdvectBoundaryKernel << <particleBlocks, threads, 0, impl->stream >> > (
             impl->currentGrid(),
             prev,
             impl->d_pos,
             impl->d_vel,
             particleCount,
-            flipRatio);
-
-        advectParticlesKernel << <particleBlocks, threads, 0, impl->stream >> > (
-            impl->currentGrid(),
-            impl->d_pos,
-            particleCount,
+            flipRatio,
             subDt);
-
-        applyParticleBoundaryKernel << <particleBlocks, threads, 0, impl->stream >> > (
-            impl->d_pos,
-            impl->d_vel,
-            particleCount,
-            nx,
-            ny,
-            nz,
-            h);
     }
 
     CUDA_CHECK(cudaGetLastError());
+
     impl->downloadParticles(particles);
 }
