@@ -149,9 +149,9 @@ bool RealtimeFluidSim::initGL() {
     std::vector<Particle> initialParticles;
     initialParticles.reserve(gridResX * gridResY * gridResZ);
     
-    float domainCenterX = (gridResX - 1) * cellSize * 0.5f;
-    float domainCenterY = (gridResY - 1) * cellSize * 0.5f;
-    float domainCenterZ = (gridResZ - 1) * cellSize * 0.5f;
+    // float domainCenterX = (gridResX - 1) * cellSize * 0.5f;
+    // float domainCenterY = (gridResY - 1) * cellSize * 0.5f;
+    // float domainCenterZ = (gridResZ - 1) * cellSize * 0.5f;
 
     const int ppc = 6;
     const float invPpc = 1.0f / static_cast<float>(ppc);
@@ -206,9 +206,9 @@ void RealtimeFluidSim::setupCallbacks() {
 void RealtimeFluidSim::mainLoop() {
     float lastFrame = static_cast<float>(glfwGetTime());
 
-    double statsAccumTime = 0.0;
-    double statsAccumFrameTimeMs = 0.0;
-    int statsFrameCount = 0;
+    // double statsAccumTime = 0.0;
+    // double statsAccumFrameTimeMs = 0.0;
+    // int statsFrameCount = 0;
 
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = static_cast<float>(glfwGetTime());
@@ -225,15 +225,16 @@ void RealtimeFluidSim::mainLoop() {
             gFluidSolver->step(deltaTime);
 
             const auto& solverParticles = gFluidSolver->getParticles();
+            size_t nParticles = solverParticles.size();
 
             std::vector<glm::vec3> displayPositions;
             std::vector<glm::vec3> displayVelocities;
-            displayPositions.reserve(solverParticles.size());
-            displayVelocities.reserve(solverParticles.size());
+            displayPositions.reserve(nParticles);
+            displayVelocities.reserve(nParticles);
 
-            for (const auto& p : solverParticles) {
-                displayPositions.push_back(glm::vec3(p.pos.x, p.pos.y, p.pos.z));
-                displayVelocities.push_back(glm::vec3(p.vel.x, p.vel.y, p.vel.z));
+            for (size_t i = 0; i < nParticles; ++i) {
+                displayPositions.push_back(glm::vec3(solverParticles.px[i], solverParticles.py[i], solverParticles.pz[i]));
+                displayVelocities.push_back(glm::vec3(solverParticles.vx[i], solverParticles.vy[i], solverParticles.vz[i]));
             }
 
             if (gParticleSystem) {
@@ -252,27 +253,27 @@ void RealtimeFluidSim::mainLoop() {
         glfwSwapBuffers(window);
         glfwPollEvents();
 
-        // Frametime stats
-        const double frameTimeMs = static_cast<double>(deltaTime) * 1000.0;
-        statsAccumTime += static_cast<double>(deltaTime);
-        statsAccumFrameTimeMs += frameTimeMs;
-        ++statsFrameCount;
+        // // Frametime stats
+        // const double frameTimeMs = static_cast<double>(deltaTime) * 1000.0;
+        // statsAccumTime += static_cast<double>(deltaTime);
+        // statsAccumFrameTimeMs += frameTimeMs;
+        // ++statsFrameCount;
 
-        // Log once per second
-        if (statsAccumTime >= 1.0) {
-            const double avgFrameTimeMs = statsAccumFrameTimeMs / static_cast<double>(statsFrameCount);
-            const double avgFps = (avgFrameTimeMs > 0.0) ? (1000.0 / avgFrameTimeMs) : 0.0;
+        // // Log once per second
+        // if (statsAccumTime >= 1.0) {
+        //     const double avgFrameTimeMs = statsAccumFrameTimeMs / static_cast<double>(statsFrameCount);
+        //     const double avgFps = (avgFrameTimeMs > 0.0) ? (1000.0 / avgFrameTimeMs) : 0.0;
 
-            std::cout
-                << "Avg frametime: " << avgFrameTimeMs << " ms | "
-                << "Avg FPS: " << avgFps << " | "
-                << "Frames: " << statsFrameCount
-                << '\n';
+        //     std::cout
+        //         << "Avg frametime: " << avgFrameTimeMs << " ms | "
+        //         << "Avg FPS: " << avgFps << " | "
+        //         << "Frames: " << statsFrameCount
+        //         << '\n';
 
-            statsAccumTime = 0.0;
-            statsAccumFrameTimeMs = 0.0;
-            statsFrameCount = 0;
-        }
+        //     statsAccumTime = 0.0;
+        //     statsAccumFrameTimeMs = 0.0;
+        //     statsFrameCount = 0;
+        // }
     }
 }
 
