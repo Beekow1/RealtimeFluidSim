@@ -7,6 +7,8 @@
 #include <iostream>
 #include <queue>
 #include <vector>
+#include <numeric>
+#include <immintrin.h>
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtx/norm.hpp>
@@ -14,6 +16,78 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+
+// AVX2 helper for trilinear interpolation of 8 particles
+static inline __m256 trilinearWeight_AVX2(__m256 fx, __m256 fy, __m256 fz, int wi, int wj, int wk) {
+    __m256 one = _mm256_set1_ps(1.0f);
+    __m256 wx = (wi == 0) ? _mm256_sub_ps(one, fx) : fx;
+    __m256 wy = (wj == 0) ? _mm256_sub_ps(one, fy) : fy;
+    __m256 wz = (wk == 0) ? _mm256_sub_ps(one, fz) : fz;
+    return _mm256_mul_ps(_mm256_mul_ps(wx, wy), wz);
+}
+
+static inline __m256 sampleComponent_AVX2(
+    const GridNode* data,
+    __m256 px, __m256 py, __m256 pz,
+    __m256 offX, __m256 offY, __m256 offZ,
+    int nx, int ny, int nz,
+    int maxI, int maxJ, int maxK,
+    int dimX, int dimY, float h
+) {
+    __m256 invH = _mm256_set1_ps(1.0f / h);
+    __m256 gx = _mm256_sub_ps(_mm256_mul_ps(px, invH), offX);
+    __m256 gy = _mm256_sub_ps(_mm256_mul_ps(py, invH), offY);
+    __m256 gz = _mm256_sub_ps(_mm256_mul_ps(pz, invH), offZ);
+
+    __m256 ix_f = _mm256_floor_ps(gx);
+    __m256 iy_f = _mm256_floor_ps(gy);
+    __m256 iz_f = _mm256_floor_ps(gz);
+
+    __m256i ix = _mm256_cvtps_epi32(ix_f);
+    __m256i iy = _mm256_cvtps_epi32(iy_f);
+    __m256i iz = _mm256_cvtps_epi32(iz_f);
+
+    __m256 fx = _mm256_sub_ps(gx, ix_f);
+    __m256 fy = _mm256_sub_ps(gy, iy_f);
+    __m256 fz = _mm256_sub_ps(gz, iz_f);
+
+    __m256 result = _mm256_setzero_ps();
+
+    __m256i v_dimX = _mm256_set1_epi32(dimX);
+    __m256i v_dimY = _mm256_set1_epi32(dimY);
+    __m256i v_maxI = _mm256_set1_epi32(maxI);
+    __m256i v_maxJ = _mm256_set1_epi32(maxJ);
+    __m256i v_maxK = _mm256_set1_epi32(maxK);
+
+    for (int dk = 0; dk <= 1; ++dk) {
+        for (int dj = 0; dj <= 1; ++dj) {
+            for (int di = 0; di <= 1; ++di) {
+                __m256i ni = _mm256_add_epi32(ix, _mm256_set1_epi32(di));
+                __m256i nj = _mm256_add_epi32(iy, _mm256_set1_epi32(dj));
+                __m256i nk = _mm256_add_epi32(iz, _mm256_set1_epi32(dk));
+
+                // Mask for valid cells
+                __m256i m_low = _mm256_and_si256(_mm256_cmpgt_epi32(ni, _mm256_set1_epi32(-1)),
+                                    _mm256_and_si256(_mm256_cmpgt_epi32(nj, _mm256_set1_epi32(-1)),
+                                                     _mm256_cmpgt_epi32(nk, _mm256_set1_epi32(-1))));
+                __m256i m_high = _mm256_and_si256(_mm256_cmpgt_epi32(_mm256_add_epi32(v_maxI, _mm256_set1_epi32(1)), ni),
+                                     _mm256_and_si256(_mm256_cmpgt_epi32(_mm256_add_epi32(v_maxJ, _mm256_set1_epi32(1)), nj),
+                                                      _mm256_cmpgt_epi32(_mm256_add_epi32(v_maxK, _mm256_set1_epi32(1)), nk)));
+                __m256 mask = _mm256_castsi256_ps(_mm256_and_si256(m_low, m_high));
+
+                // Index calculation: ni + dimX * (nj + dimY * nk)
+                __m256i indices = _mm256_add_epi32(ni, _mm256_mullo_epi32(v_dimX, _mm256_add_epi32(nj, _mm256_mullo_epi32(v_dimY, nk))));
+                
+                // Gather GridNode::val (GridNode is 2 floats, so scale 8)
+                __m256 vals = _mm256_mask_i32gather_ps(_mm256_setzero_ps(), (const float*)data, indices, mask, 8);
+                
+                __m256 weights = trilinearWeight_AVX2(fx, fy, fz, di, dj, dk);
+                result = _mm256_fmadd_ps(weights, vals, result);
+            }
+        }
+    }
+    return result;
+}
 
 static inline float trilinearWeight(float fx, float fy, float fz, int wi, int wj, int wk) {
     const float wx = (wi == 0) ? (1.0f - fx) : fx;
@@ -24,14 +98,31 @@ static inline float trilinearWeight(float fx, float fy, float fz, int wi, int wj
 
 FLIPSolver::FLIPSolver(int nx, int ny, int nz, float h)
     : grid(nx, ny, nz, h),
-    cellType(nx * ny * nz, AIR),
     materialDensity(1.0f),
     flipRatio(0.95f),
     pressureIterations(100) {
+    const int BS = 8;
+    const int nxb = (nx + BS - 1) / BS;
+    const int nyb = (ny + BS - 1) / BS;
+    const int nzb = (nz + BS - 1) / BS;
+    cellType.resize(nxb * nyb * nzb * BS * BS * BS, AIR);
 }
 
 int FLIPSolver::cellIndex(int i, int j, int k) const {
-    return i + grid.getNx() * (j + grid.getNy() * k);
+    const int BS = 8; // Block size for tiling
+    const int nxb = (grid.getNx() + BS - 1) / BS;
+    const int nyb = (grid.getNy() + BS - 1) / BS;
+
+    const int bi = i / BS;
+    const int bj = j / BS;
+    const int bk = k / BS;
+
+    const int si = i % BS;
+    const int sj = j % BS;
+    const int sk = k % BS;
+
+    const int blockIdx = bi + nxb * (bj + nyb * bk);
+    return blockIdx * (BS * BS * BS) + (si + BS * (sj + BS * sk));
 }
 
 bool FLIPSolver::isValidCell(int i, int j, int k) const {
@@ -51,16 +142,9 @@ void FLIPSolver::step(float dt) {
 
     for (int s = 0; s < substeps; ++s) {
         auto start = std::chrono::high_resolution_clock::now();
-        if (mode != SimulationMode::SERIAL && mode != SimulationMode::PARALLEL_NO_SORT) {
-            sortParticles();
-        }
-        auto end = std::chrono::high_resolution_clock::now();
-        stats.t_sort += std::chrono::duration<double>(end - start).count();
-
-        start = std::chrono::high_resolution_clock::now();
         markFluidCells();
         particlesToGrid();
-        end = std::chrono::high_resolution_clock::now();
+        auto end = std::chrono::high_resolution_clock::now();
         stats.t_p2g += std::chrono::duration<double>(end - start).count();
 
         start = std::chrono::high_resolution_clock::now();
@@ -79,7 +163,6 @@ void FLIPSolver::step(float dt) {
         end = std::chrono::high_resolution_clock::now();
         stats.t_grid += std::chrono::duration<double>(end - start).count();
 
-
         start = std::chrono::high_resolution_clock::now();
         gridToParticles(oldGrid, subDt);
         end = std::chrono::high_resolution_clock::now();
@@ -96,11 +179,10 @@ void FLIPSolver::step(float dt) {
     
     // Print aggregated stats every 60 frames
     if (aggrStats.frameCount >= 60) {
-        double total = aggrStats.sum_sort + aggrStats.sum_p2g + aggrStats.sum_grid + aggrStats.sum_g2p + aggrStats.sum_advect;
+        double total = aggrStats.sum_p2g + aggrStats.sum_grid + aggrStats.sum_g2p + aggrStats.sum_advect;
         double f = 1.0 / aggrStats.frameCount;
         
-        printf("\n--- AVG OVER 60 FRAMES (Mode: %d) ---\n", static_cast<int>(mode));
-        printf("Sort:   %.4f ms\n", aggrStats.sum_sort * f * 1000.0);
+        printf("\n--- AVG OVER 60 FRAMES (Mode: %d, Threads: %d) ---\n", static_cast<int>(mode), nthreads);
         printf("P2G:    %.4f ms\n", aggrStats.sum_p2g * f * 1000.0);
         printf("Grid:   %.4f ms\n", aggrStats.sum_grid * f * 1000.0);
         printf("G2P:    %.4f ms\n", aggrStats.sum_g2p * f * 1000.0);
@@ -120,27 +202,26 @@ void FLIPSolver::markFluidCells() {
     const float maxX = grid.getNx() * h;
     const float maxY = grid.getNy() * h;
     const float maxZ = grid.getNz() * h;
-    const int totalCells = grid.getNx() * grid.getNy() * grid.getNz();
+    const int totalCells = static_cast<int>(cellType.size());
 
-    const int threadCount = omp_get_max_threads();
+    const int threadCount = (mode == SimulationMode::SERIAL) ? 1 : nthreads;
     std::vector<std::vector<std::uint8_t>> localMasks(
         threadCount,
         std::vector<std::uint8_t>(totalCells, 0)
     );
 
-    // Mark cells containing particles as WATER and OCCUPIED
-#pragma omp parallel if(mode != SimulationMode::SERIAL)
+    // Mark cells containing particles as WATER
+#pragma omp parallel num_threads(threadCount) if(mode != SimulationMode::SERIAL)
     {
-        const int tid = omp_get_thread_num();
+        const int tid = (mode == SimulationMode::SERIAL) ? 0 : omp_get_thread_num();
         auto& mask = localMasks[tid];
 
 #pragma omp for
         for (int pIdx = 0; pIdx < static_cast<int>(particles.size()); ++pIdx) {
-            const auto& particle = particles[pIdx];
             const Vec3 p(
-                std::clamp(particle.pos.x, 0.0f, maxX - 1e-5f),
-                std::clamp(particle.pos.y, 0.0f, maxY - 1e-5f),
-                std::clamp(particle.pos.z, 0.0f, maxZ - 1e-5f)
+                std::clamp(particles.px[pIdx], 0.0f, maxX - 1e-5f),
+                std::clamp(particles.py[pIdx], 0.0f, maxY - 1e-5f),
+                std::clamp(particles.pz[pIdx], 0.0f, maxZ - 1e-5f)
             );
 
             const int i = std::clamp(static_cast<int>(p.x / h), 0, grid.getNx() - 1);
@@ -151,7 +232,7 @@ void FLIPSolver::markFluidCells() {
         }
     }
 
-#pragma omp parallel for if(mode != SimulationMode::SERIAL)
+#pragma omp parallel for num_threads(nthreads) if(mode != SimulationMode::SERIAL)
     for (int idx = 0; idx < totalCells; ++idx) {
         bool occupied = false;
         for (int t = 0; t < threadCount; ++t) {
@@ -170,108 +251,114 @@ void FLIPSolver::particlesToGrid() {
 
     float h = grid.getDims();
 
-    // For each particle, distribute its velocity to surrounding grid nodes
-#pragma omp parallel for if(mode != SimulationMode::SERIAL)
-    for (int pIdx = 0; pIdx < static_cast<int>(particles.size()); ++pIdx) {
-        const auto& particle = particles[pIdx];
-        // Convert world position to grid coordinates
-        Vec3 gridPos = particle.pos / h;
+#pragma omp parallel num_threads(nthreads) if(mode != SimulationMode::SERIAL)
+    {
+        // For each particle, distribute its velocity to surrounding grid nodes
+#pragma omp for
+        for (int pIdx = 0; pIdx < static_cast<int>(particles.size()); ++pIdx) {
+            // Convert world position to grid coordinates
+            Vec3 gridPos(particles.px[pIdx] / h, particles.py[pIdx] / h, particles.pz[pIdx] / h);
 
-        int i = static_cast<int>(std::floor(gridPos.x));
-        int j = static_cast<int>(std::floor(gridPos.y));
-        int k = static_cast<int>(std::floor(gridPos.z));
+            int i = static_cast<int>(std::floor(gridPos.x));
+            int j = static_cast<int>(std::floor(gridPos.y));
+            int k = static_cast<int>(std::floor(gridPos.z));
 
-        float fx = gridPos.x - i;
-        float fy = gridPos.y - j;
-        float fz = gridPos.z - k;
+            float fx = gridPos.x - i;
+            float fy = gridPos.y - j;
+            float fz = gridPos.z - k;
 
-        // Clamp to valid range
-        i = std::clamp(i, 0, grid.getNx() - 1);
-        j = std::clamp(j, 0, grid.getNy() - 1);
-        k = std::clamp(k, 0, grid.getNz() - 1);
+            // Clamp to valid range
+            i = std::clamp(i, 0, grid.getNx() - 1);
+            j = std::clamp(j, 0, grid.getNy() - 1);
+            k = std::clamp(k, 0, grid.getNz() - 1);
 
-        fx = std::max(0.0f, std::min(1.0f, fx));
-        fy = std::max(0.0f, std::min(1.0f, fy));
-        fz = std::max(0.0f, std::min(1.0f, fz));
+            fx = std::max(0.0f, std::min(1.0f, fx));
+            fy = std::max(0.0f, std::min(1.0f, fy));
+            fz = std::max(0.0f, std::min(1.0f, fz));
 
-        // Distribute to U grid
-        for (int di = 0; di <= 1; ++di) {
-            for (int dj = 0; dj <= 1; ++dj) {
-                for (int dk = 0; dk <= 1; ++dk) {
-                    int ui = i + di;
-                    int uj = j + dj;
-                    int uk = k + dk;
+            const float pvx = particles.vx[pIdx];
+            const float pvy = particles.vy[pIdx];
+            const float pvz = particles.vz[pIdx];
 
-                    if (ui >= 0 && ui <= grid.getNx() &&
-                        uj >= 0 && uj < grid.getNy() &&
-                        uk >= 0 && uk < grid.getNz()) {
+            // Distribute to U grid
+            for (int di = 0; di <= 1; ++di) {
+                for (int dj = 0; dj <= 1; ++dj) {
+                    for (int dk = 0; dk <= 1; ++dk) {
+                        int ui = i + di;
+                        int uj = j + dj;
+                        int uk = k + dk;
 
-                        float weight = trilinearWeight(fx, fy, fz, di, dj, dk);
-                        float val = weight * particle.vel.x;
-                        if (mode != SimulationMode::SERIAL) {
+                        if (ui >= 0 && ui <= grid.getNx() &&
+                            uj >= 0 && uj < grid.getNy() &&
+                            uk >= 0 && uk < grid.getNz()) {
 
-                            grid.U(ui, uj, uk) += val;
-
-                            grid.getWeightU(ui, uj, uk) += weight;
-                        } else {
-                            grid.U(ui, uj, uk) += val;
-                            grid.getWeightU(ui, uj, uk) += weight;
+                            float weight = trilinearWeight(fx, fy, fz, di, dj, dk);
+                            float val = weight * pvx;
+                            if (mode != SimulationMode::SERIAL) {
+                                
+                                grid.U(ui, uj, uk) += val;
+                                
+                                grid.getWeightU(ui, uj, uk) += weight;
+                            } else {
+                                grid.U(ui, uj, uk) += val;
+                                grid.getWeightU(ui, uj, uk) += weight;
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // Distribute to V grid
-        for (int di = 0; di <= 1; ++di) {
-            for (int dj = 0; dj <= 1; ++dj) {
-                for (int dk = 0; dk <= 1; ++dk) {
-                    int vi = i + di;
-                    int vj = j + dj;
-                    int vk = k + dk;
+            // Distribute to V grid
+            for (int di = 0; di <= 1; ++di) {
+                for (int dj = 0; dj <= 1; ++dj) {
+                    for (int dk = 0; dk <= 1; ++dk) {
+                        int vi = i + di;
+                        int vj = j + dj;
+                        int vk = k + dk;
 
-                    if (vi >= 0 && vi < grid.getNx() &&
-                        vj >= 0 && vj <= grid.getNy() &&
-                        vk >= 0 && vk < grid.getNz()) {
+                        if (vi >= 0 && vi < grid.getNx() &&
+                            vj >= 0 && vj <= grid.getNy() &&
+                            vk >= 0 && vk < grid.getNz()) {
 
-                        float weight = trilinearWeight(fx, fy, fz, di, dj, dk);
-                        float val = weight * particle.vel.y;
-                        if (mode != SimulationMode::SERIAL) {
-
-                            grid.V(vi, vj, vk) += val;
-
-                            grid.getWeightV(vi, vj, vk) += weight;
-                        } else {
-                            grid.V(vi, vj, vk) += val;
-                            grid.getWeightV(vi, vj, vk) += weight;
+                            float weight = trilinearWeight(fx, fy, fz, di, dj, dk);
+                            float val = weight * pvy;
+                            if (mode != SimulationMode::SERIAL) {
+                                
+                                grid.V(vi, vj, vk) += val;
+                                
+                                grid.getWeightV(vi, vj, vk) += weight;
+                            } else {
+                                grid.V(vi, vj, vk) += val;
+                                grid.getWeightV(vi, vj, vk) += weight;
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // Distribute to W grid
-        for (int di = 0; di <= 1; ++di) {
-            for (int dj = 0; dj <= 1; ++dj) {
-                for (int dk = 0; dk <= 1; ++dk) {
-                    int wi = i + di;
-                    int wj = j + dj;
-                    int wk = k + dk;
+            // Distribute to W grid
+            for (int di = 0; di <= 1; ++di) {
+                for (int dj = 0; dj <= 1; ++dj) {
+                    for (int dk = 0; dk <= 1; ++dk) {
+                        int wi = i + di;
+                        int wj = j + dj;
+                        int wk = k + dk;
 
-                    if (wi >= 0 && wi < grid.getNx() &&
-                        wj >= 0 && wj < grid.getNy() &&
-                        wk >= 0 && wk <= grid.getNz()) {
+                        if (wi >= 0 && wi < grid.getNx() &&
+                            wj >= 0 && wj < grid.getNy() &&
+                            wk >= 0 && wk <= grid.getNz()) {
 
-                        float weight = trilinearWeight(fx, fy, fz, di, dj, dk);
-                        float val = weight * particle.vel.z;
-                        if (mode != SimulationMode::SERIAL) {
-
-                            grid.W(wi, wj, wk) += val;
-
-                            grid.getWeightW(wi, wj, wk) += weight;
-                        } else {
-                            grid.W(wi, wj, wk) += val;
-                            grid.getWeightW(wi, wj, wk) += weight;
+                            float weight = trilinearWeight(fx, fy, fz, di, dj, dk);
+                            float val = weight * pvz;
+                            if (mode != SimulationMode::SERIAL) {
+                                
+                                grid.W(wi, wj, wk) += val;
+                                
+                                grid.getWeightW(wi, wj, wk) += weight;
+                            } else {
+                                grid.W(wi, wj, wk) += val;
+                                grid.getWeightW(wi, wj, wk) += weight;
+                            }
                         }
                     }
                 }
@@ -280,7 +367,7 @@ void FLIPSolver::particlesToGrid() {
     }
 
     // Normalize by weights
-#pragma omp parallel for if(mode != SimulationMode::SERIAL && grid.getNx() * grid.getNy() * grid.getNz() > 1024)
+#pragma omp parallel for num_threads(nthreads) if(mode != SimulationMode::SERIAL && grid.getNx() * grid.getNy() * grid.getNz() > 1024)
     for (int i = 0; i <= grid.getNx(); ++i) {
         for (int j = 0; j < grid.getNy(); ++j) {
             for (int k = 0; k < grid.getNz(); ++k) {
@@ -291,7 +378,7 @@ void FLIPSolver::particlesToGrid() {
             }
         }
     }
-#pragma omp parallel for if(mode != SimulationMode::SERIAL && grid.getNx() * grid.getNy() * grid.getNz() > 1024)
+#pragma omp parallel for num_threads(nthreads) if(mode != SimulationMode::SERIAL && grid.getNx() * grid.getNy() * grid.getNz() > 1024)
     for (int i = 0; i < grid.getNx(); ++i) {
         for (int j = 0; j <= grid.getNy(); ++j) {
             for (int k = 0; k < grid.getNz(); ++k) {
@@ -302,7 +389,7 @@ void FLIPSolver::particlesToGrid() {
             }
         }
     }
-#pragma omp parallel for if(mode != SimulationMode::SERIAL && grid.getNx() * grid.getNy() * grid.getNz() > 1024)
+#pragma omp parallel for num_threads(nthreads) if(mode != SimulationMode::SERIAL && grid.getNx() * grid.getNy() * grid.getNz() > 1024)
     for (int i = 0; i < grid.getNx(); ++i) {
         for (int j = 0; j < grid.getNy(); ++j) {
             for (int k = 0; k <= grid.getNz(); ++k) {
@@ -317,7 +404,7 @@ void FLIPSolver::particlesToGrid() {
 
 void FLIPSolver::addGravity(float dt) {
 	const Vec3 gravity(0.0f, -9.81f, 0.0f);
-#pragma omp parallel for if(mode != SimulationMode::SERIAL && grid.getNx() * grid.getNy() * grid.getNz() > 1024)
+#pragma omp parallel for num_threads(nthreads) if(mode != SimulationMode::SERIAL && grid.getNx() * grid.getNy() * grid.getNz() > 1024)
 	for (int i = 0; i < grid.getNx(); ++i) {
 		for (int j = 0; j <= grid.getNy(); ++j) {
 			for (int k = 0; k < grid.getNz(); ++k) {
@@ -333,7 +420,7 @@ void FLIPSolver::solvePressure(float dt) {
     const int nz = grid.getNz();
     const float h = grid.getDims();
     const float safeDt = std::max(dt, 1e-6f);
-    const int nCells = nx * ny * nz;
+    const int nCells = static_cast<int>(cellType.size());
 
     grid.clearPressure();
 
@@ -341,7 +428,7 @@ void FLIPSolver::solvePressure(float dt) {
     std::vector<float> pNew(nCells, 0.0f);
 
     for (int iter = 0; iter < pressureIterations; ++iter) {
-#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
+#pragma omp parallel for num_threads(nthreads) if(mode != SimulationMode::SERIAL)
         for (int k = 0; k < nz; ++k) {
             for (int j = 0; j < ny; ++j) {
                 for (int i = 0; i < nx; ++i) {
@@ -352,7 +439,6 @@ void FLIPSolver::solvePressure(float dt) {
                     }
 
                     const float rhs = (materialDensity / safeDt) * grid.divergence(i, j, k);
-
                     float sum = 0.0f;
                     int diag = 0;
 
@@ -360,11 +446,8 @@ void FLIPSolver::solvePressure(float dt) {
                         if (!isValidCell(ni, nj, nk)) return;
                         const CellType t = cellType[cellIndex(ni, nj, nk)];
                         if (t == SOLID) return;
-
                         ++diag;
-                        if (t == WATER) {
-                            sum += pOld[cellIndex(ni, nj, nk)];
-                        }
+                        if (t == WATER) sum += pOld[cellIndex(ni, nj, nk)];
                     };
 
                     consider(i - 1, j, k);
@@ -374,17 +457,14 @@ void FLIPSolver::solvePressure(float dt) {
                     consider(i, j, k - 1);
                     consider(i, j, k + 1);
 
-                    pNew[idx] = (diag > 0)
-                        ? (sum - rhs * h * h) / static_cast<float>(diag)
-                        : 0.0f;
+                    pNew[idx] = (diag > 0) ? (sum - rhs * h * h) / static_cast<float>(diag) : 0.0f;
                 }
             }
         }
-
         pOld.swap(pNew);
     }
 
-#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
+#pragma omp parallel for num_threads(nthreads) if(mode != SimulationMode::SERIAL && nCells > 1024)
     for (int k = 0; k < nz; ++k) {
         for (int j = 0; j < ny; ++j) {
             for (int i = 0; i < nx; ++i) {
@@ -393,7 +473,7 @@ void FLIPSolver::solvePressure(float dt) {
         }
     }
 
-#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
+#pragma omp parallel for num_threads(nthreads) if(mode != SimulationMode::SERIAL && nCells > 1024)
     for (int i = 1; i < nx; ++i) {
         for (int j = 0; j < ny; ++j) {
             for (int k = 0; k < nz; ++k) {
@@ -416,7 +496,7 @@ void FLIPSolver::solvePressure(float dt) {
         }
     }
 
-#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
+#pragma omp parallel for num_threads(nthreads) if(mode != SimulationMode::SERIAL && nCells > 1024)
     for (int i = 0; i < nx; ++i) {
         for (int j = 1; j < ny; ++j) {
             for (int k = 0; k < nz; ++k) {
@@ -439,7 +519,7 @@ void FLIPSolver::solvePressure(float dt) {
         }
     }
 
-#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
+#pragma omp parallel for num_threads(nthreads) if(mode != SimulationMode::SERIAL && nCells > 1024)
     for (int i = 0; i < nx; ++i) {
         for (int j = 0; j < ny; ++j) {
             for (int k = 1; k < nz; ++k) {
@@ -465,7 +545,7 @@ void FLIPSolver::solvePressure(float dt) {
 
 void FLIPSolver::applyGridBoundaryConditions() {
 
-#pragma omp parallel sections if(mode != SimulationMode::SERIAL)
+#pragma omp parallel sections num_threads(nthreads) if(mode != SimulationMode::SERIAL)
     {
 #pragma omp section
         {
@@ -506,60 +586,129 @@ void FLIPSolver::applyBoundaryConditions() {
     const float maxY = grid.getNy() * h;
     const float maxZ = grid.getNz() * h;
 
-#pragma omp parallel for schedule(static) if(mode != SimulationMode::SERIAL)
+#pragma omp parallel for num_threads(nthreads) schedule(static) if(mode != SimulationMode::SERIAL)
     for (int pIdx = 0; pIdx < static_cast<int>(particles.size()); ++pIdx) {
-        auto& p = particles[pIdx];
+        float px = particles.px[pIdx];
+        float py = particles.py[pIdx];
+        float pz = particles.pz[pIdx];
+        float vx = particles.vx[pIdx];
+        float vy = particles.vy[pIdx];
+        float vz = particles.vz[pIdx];
 
-        if (p.pos.x < eps) {
-            p.pos.x = eps;
-            if (p.vel.x < 0.0f) p.vel.x = 0.0f;
-            p.vel.y *= 0.0f;
-            p.vel.z *= 0.0f;
+        if (px < eps) {
+            px = eps;
+            if (vx < 0.0f) vx = 0.0f;
+            vy = 0.0f;
+            vz = 0.0f;
         }
-        else if (p.pos.x > maxX - eps) {
-            p.pos.x = maxX - eps;
-            if (p.vel.x > 0.0f) p.vel.x = 0.0f;
-            p.vel.y = 0.0f;
-            p.vel.z = 0.0f;
-        }
-
-        if (p.pos.y < eps) {
-            p.pos.y = eps;
-            if (p.vel.y < 0.0f) p.vel.y = 0.0f;
-            p.vel.x = 0.0f;
-            p.vel.z = 0.0f;
-        }
-        else if (p.pos.y > maxY - eps) {
-            p.pos.y = maxY - eps;
-            if (p.vel.y > 0.0f) p.vel.y = 0.0f;
-            p.vel.x = 0.0f;
-            p.vel.z = 0.0f;
+        else if (px > maxX - eps) {
+            px = maxX - eps;
+            if (vx > 0.0f) vx = 0.0f;
+            vy = 0.0f;
+            vz = 0.0f;
         }
 
-        if (p.pos.z < eps) {
-            p.pos.z = eps;
-            if (p.vel.z < 0.0f) p.vel.z = 0.0f;
-            p.vel.x = 0.0f;
-            p.vel.y = 0.0f;
+        if (py < eps) {
+            py = eps;
+            if (vy < 0.0f) vy = 0.0f;
+            vx = 0.0f;
+            vz = 0.0f;
         }
-        else if (p.pos.z > maxZ - eps) {
-            p.pos.z = maxZ - eps;
-            if (p.vel.z > 0.0f) p.vel.z = 0.0f;
-            p.vel.x = 0.0f;
-            p.vel.y = 0.0f;
+        else if (py > maxY - eps) {
+            py = maxY - eps;
+            if (vy > 0.0f) vy = 0.0f;
+            vx = 0.0f;
+            vz = 0.0f;
         }
+
+        if (pz < eps) {
+            pz = eps;
+            if (vz < 0.0f) vz = 0.0f;
+            vx = 0.0f;
+            vy = 0.0f;
+        }
+        else if (pz > maxZ - eps) {
+            pz = maxZ - eps;
+            if (vz > 0.0f) vz = 0.0f;
+            vx = 0.0f;
+            vy = 0.0f;
+        }
+
+        particles.px[pIdx] = px;
+        particles.py[pIdx] = py;
+        particles.pz[pIdx] = pz;
+        particles.vx[pIdx] = vx;
+        particles.vy[pIdx] = vy;
+        particles.vz[pIdx] = vz;
     }
 }
 
+struct Vec3_AVX2 {
+    __m256 x, y, z;
+};
+
+static inline Vec3_AVX2 sampleMAC_AVX2(const MACGrid& g, __m256 px, __m256 py, __m256 pz) {
+    float h = g.getDims();
+    int nx = g.getNx();
+    int ny = g.getNy();
+    int nz = g.getNz();
+
+    __m256 u = sampleComponent_AVX2(g.getUData(), px, py, pz, _mm256_setzero_ps(), _mm256_set1_ps(0.5f), _mm256_set1_ps(0.5f), nx, ny, nz, nx, ny - 1, nz - 1, nx + 1, ny, h);
+    __m256 v = sampleComponent_AVX2(g.getVData(), px, py, pz, _mm256_set1_ps(0.5f), _mm256_setzero_ps(), _mm256_set1_ps(0.5f), nx, ny, nz, nx - 1, ny, nz - 1, nx, ny + 1, h);
+    __m256 w = sampleComponent_AVX2(g.getWData(), px, py, pz, _mm256_set1_ps(0.5f), _mm256_set1_ps(0.5f), _mm256_setzero_ps(), nx, ny, nz, nx - 1, ny - 1, nz, nx, ny, h);
+
+    return { u, v, w };
+}
+
 void FLIPSolver::gridToParticles(const MACGrid& oldGrid, float dt) {
-#pragma omp parallel for schedule(static) if(mode != SimulationMode::SERIAL)
-    for (int p = 0; p < static_cast<int>(particles.size()); ++p) {
-        auto& particle = particles[p];
-        const Vec3 picVel = sampleMAC(grid, particle.pos);
-        const Vec3 oldVel = sampleMAC(oldGrid, particle.pos);
+    const int nParticles = static_cast<int>(particles.size());
+    const int n8 = nParticles - (nParticles % 8);
+    const __m256 v_flipRatio = _mm256_set1_ps(flipRatio);
+    const __m256 v_oneMinusFlip = _mm256_set1_ps(1.0f - flipRatio);
+
+#pragma omp parallel for num_threads(nthreads) schedule(static) if(mode != SimulationMode::SERIAL)
+    for (int p = 0; p < n8; p += 8) {
+        __m256 px = _mm256_loadu_ps(&particles.px[p]);
+        __m256 py = _mm256_loadu_ps(&particles.py[p]);
+        __m256 pz = _mm256_loadu_ps(&particles.pz[p]);
+        __m256 vx = _mm256_loadu_ps(&particles.vx[p]);
+        __m256 vy = _mm256_loadu_ps(&particles.vy[p]);
+        __m256 vz = _mm256_loadu_ps(&particles.vz[p]);
+
+        Vec3_AVX2 picVel = sampleMAC_AVX2(grid, px, py, pz);
+        Vec3_AVX2 oldVel = sampleMAC_AVX2(oldGrid, px, py, pz);
+
+        __m256 flipDeltaX = _mm256_sub_ps(picVel.x, oldVel.x);
+        __m256 flipDeltaY = _mm256_sub_ps(picVel.y, oldVel.y);
+        __m256 flipDeltaZ = _mm256_sub_ps(picVel.z, oldVel.z);
+
+        __m256 flipVelX = _mm256_add_ps(vx, flipDeltaX);
+        __m256 flipVelY = _mm256_add_ps(vy, flipDeltaY);
+        __m256 flipVelZ = _mm256_add_ps(vz, flipDeltaZ);
+
+        __m256 newVelX = _mm256_add_ps(_mm256_mul_ps(v_flipRatio, flipVelX), _mm256_mul_ps(v_oneMinusFlip, picVel.x));
+        __m256 newVelY = _mm256_add_ps(_mm256_mul_ps(v_flipRatio, flipVelY), _mm256_mul_ps(v_oneMinusFlip, picVel.y));
+        __m256 newVelZ = _mm256_add_ps(_mm256_mul_ps(v_flipRatio, flipVelZ), _mm256_mul_ps(v_oneMinusFlip, picVel.z));
+
+        _mm256_storeu_ps(&particles.vx[p], newVelX);
+        _mm256_storeu_ps(&particles.vy[p], newVelY);
+        _mm256_storeu_ps(&particles.vz[p], newVelZ);
+    }
+
+    // Handle remaining particles
+    for (int p = n8; p < nParticles; ++p) {
+        Vec3 pos(particles.px[p], particles.py[p], particles.pz[p]);
+        Vec3 vel(particles.vx[p], particles.vy[p], particles.vz[p]);
+
+        const Vec3 picVel = sampleMAC(grid, pos);
+        const Vec3 oldVel = sampleMAC(oldGrid, pos);
         const Vec3 flipDelta = picVel - oldVel;
-        const Vec3 flipVel = particle.vel + flipDelta;
-        particle.vel = flipRatio * flipVel + (1.0f - flipRatio) * picVel;
+        const Vec3 flipVel = vel + flipDelta;
+        Vec3 newVel = flipRatio * flipVel + (1.0f - flipRatio) * picVel;
+
+        particles.vx[p] = newVel.x;
+        particles.vy[p] = newVel.y;
+        particles.vz[p] = newVel.z;
     }
 }
 
@@ -570,27 +719,32 @@ void FLIPSolver::advectParticles(float dt) {
     const float maxY = grid.getNy() * h;
     const float maxZ = grid.getNz() * h;
     // RK2 integration
-#pragma omp parallel for schedule(static) if(mode != SimulationMode::SERIAL)
+#pragma omp parallel for num_threads(nthreads) schedule(static) if(mode != SimulationMode::SERIAL)
     for (int p = 0; p < static_cast<int>(particles.size()); ++p) {
         float t = 0.0f;
+        Vec3 pos(particles.px[p], particles.py[p], particles.pz[p]);
 
         while (t < dt) {
-            const Vec3 v0 = sampleMAC(grid, particles[p].pos);
+            const Vec3 v0 = sampleMAC(grid, pos);
             const float speed = glm::length(v0);
             const float subDt = (speed > 1e-6f)
                 ? std::min(dt - t, 0.9f * h / speed)
                 : (dt - t);
 
-            const Vec3 midPos = particles[p].pos + 0.5f * subDt * v0;
+            const Vec3 midPos = pos + 0.5f * subDt * v0;
             const Vec3 vMid = sampleMAC(grid, midPos);
 
-            particles[p].pos += subDt * vMid;
+            pos += subDt * vMid;
             t += subDt;
 
-            particles[p].pos.x = std::clamp(particles[p].pos.x, eps, maxX - eps);
-            particles[p].pos.y = std::clamp(particles[p].pos.y, eps, maxY - eps);
-            particles[p].pos.z = std::clamp(particles[p].pos.z, eps, maxZ - eps);
+            pos.x = std::clamp(pos.x, eps, maxX - eps);
+            pos.y = std::clamp(pos.y, eps, maxY - eps);
+            pos.z = std::clamp(pos.z, eps, maxZ - eps);
         }
+
+        particles.px[p] = pos.x;
+        particles.py[p] = pos.y;
+        particles.pz[p] = pos.z;
     }
 }
 
@@ -673,58 +827,6 @@ Vec3 FLIPSolver::sampleMAC(const MACGrid& g, const Vec3& x) const {
     return Vec3(u, v, w);
 }
 
-void FLIPSolver::sortParticles() {
-    if (particles.empty()) return;
-
-    const int nParticles = static_cast<int>(particles.size());
-    const int nCells = grid.getNx() * grid.getNy() * grid.getNz();
-    const float h = grid.getDims();
-
-    std::vector<int> cellCounts(nCells + 1, 0);
-    std::vector<int> particleCells(nParticles);
-
-    // 1. Count particles per cell
-#pragma omp parallel if(mode != SimulationMode::SERIAL)
-    {
-        std::vector<int> localCounts(nCells + 1, 0);
-#pragma omp for nowait
-        for (int i = 0; i < nParticles; ++i) {
-            int ix = std::clamp(static_cast<int>(particles[i].pos.x / h), 0, grid.getNx() - 1);
-            int iy = std::clamp(static_cast<int>(particles[i].pos.y / h), 0, grid.getNy() - 1);
-            int iz = std::clamp(static_cast<int>(particles[i].pos.z / h), 0, grid.getNz() - 1);
-            int cIdx = cellIndex(ix, iy, iz);
-            particleCells[i] = cIdx;
-            localCounts[cIdx]++;
-        }
-
-#pragma omp critical
-        {
-            for (int i = 0; i < nCells; ++i) {
-                cellCounts[i] += localCounts[i];
-            }
-        }
-    }
-
-    // 2. Compute prefix sums (offsets)
-    std::vector<int> offsets(nCells + 1);
-    offsets[0] = 0;
-    for (int i = 0; i < nCells; ++i) {
-        offsets[i + 1] = offsets[i] + cellCounts[i];
-    }
-
-    // 3. Reorder particles into a temporary buffer
-    std::vector<Particle> sortedParticles(nParticles);
-    std::vector<int> currentOffsets = offsets; // Copy to track insertion points
-
-    for (int i = 0; i < nParticles; ++i) {
-        int cIdx = particleCells[i];
-        int destIdx = currentOffsets[cIdx]++;
-        sortedParticles[destIdx] = particles[i];
-    }
-
-    particles.swap(sortedParticles);
-}
-
 void FLIPSolver::solvePressureRBGS(float dt) {
     const int nx = grid.getNx();
     const int ny = grid.getNy();
@@ -737,7 +839,7 @@ void FLIPSolver::solvePressureRBGS(float dt) {
 
     for (int iter = 0; iter < pressureIterations; ++iter) {
         for (int pass = 0; pass < 2; ++pass) {
-#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
+#pragma omp parallel for num_threads(nthreads) if(mode != SimulationMode::SERIAL && nCells > 1024)
             for (int k = 0; k < nz; ++k) {
                 for (int j = 0; j < ny; ++j) {
                     int i_start = (pass + j + k) % 2;
@@ -782,7 +884,7 @@ void FLIPSolver::solvePressureRBGS(float dt) {
         }
     }
 
-#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
+#pragma omp parallel for num_threads(nthreads) if(mode != SimulationMode::SERIAL && nCells > 1024)
     for (int i = 1; i < nx; ++i) {
         for (int j = 0; j < ny; ++j) {
             for (int k = 0; k < nz; ++k) {
@@ -797,7 +899,7 @@ void FLIPSolver::solvePressureRBGS(float dt) {
         }
     }
 
-#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
+#pragma omp parallel for num_threads(nthreads) if(mode != SimulationMode::SERIAL && nCells > 1024)
     for (int i = 0; i < nx; ++i) {
         for (int j = 1; j < ny; ++j) {
             for (int k = 0; k < nz; ++k) {
@@ -812,7 +914,7 @@ void FLIPSolver::solvePressureRBGS(float dt) {
         }
     }
 
-#pragma omp parallel for if(mode != SimulationMode::SERIAL && nCells > 1024)
+#pragma omp parallel for num_threads(nthreads) if(mode != SimulationMode::SERIAL && nCells > 1024)
     for (int i = 0; i < nx; ++i) {
         for (int j = 0; j < ny; ++j) {
             for (int k = 1; k < nz; ++k) {
@@ -827,3 +929,7 @@ void FLIPSolver::solvePressureRBGS(float dt) {
         }
     }
 }
+
+
+
+

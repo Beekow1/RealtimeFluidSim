@@ -6,6 +6,10 @@
 #include <glm/glm.hpp>
 #include <vector>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 using Vec3 = glm::vec3;
 
 enum CellType {
@@ -15,30 +19,27 @@ enum CellType {
 };
 
 enum class SimulationMode {
-    SERIAL,             // Serial execution (no sorting, no parallel)
-    PARALLEL_NO_SORT,   // Parallel execution but without particle sorting
-    PARALLEL_SORT,      // Parallel execution with particle sorting (Jacobi)
-    PARALLEL_RBGS       // Parallel execution with particle sorting + Red-Black Gauss-Seidel
+    SERIAL,
+    PARALLEL,      // Jacobi
+    PARALLEL_RBGS  // Red-Black Gauss-Seidel
 };
 
 struct SimulationStats {
-    double t_sort = 0;
     double t_p2g = 0;
     double t_grid = 0;
     double t_g2p = 0;
     double t_advect = 0;
 
     void reset() {
-        t_sort = t_p2g = t_grid = t_g2p = t_advect = 0;
+        t_p2g = t_grid = t_g2p = t_advect = 0;
     }
 };
 
 struct AggregatedStats {
-    double sum_sort = 0, sum_p2g = 0, sum_grid = 0, sum_g2p = 0, sum_advect = 0;
+    double sum_p2g = 0, sum_grid = 0, sum_g2p = 0, sum_advect = 0;
     int frameCount = 0;
 
     void add(const SimulationStats& s) {
-        sum_sort += s.t_sort;
         sum_p2g += s.t_p2g;
         sum_grid += s.t_grid;
         sum_g2p += s.t_g2p;
@@ -47,7 +48,7 @@ struct AggregatedStats {
     }
 
     void reset() {
-        sum_sort = sum_p2g = sum_grid = sum_g2p = sum_advect = 0;
+        sum_p2g = sum_grid = sum_g2p = sum_advect = 0;
         frameCount = 0;
     }
 };
@@ -55,25 +56,29 @@ struct AggregatedStats {
 class FLIPSolver {
 public:
     FLIPSolver(int nx, int ny, int nz, float h);
+    int nthreads = 16;
 
     void step(float dt);
 
-    std::vector<Particle>& getParticles() { return particles; }
-    const std::vector<Particle>& getParticles() const { return particles; }
+    ParticleBuffer& getParticles() { return particles; }
+    const ParticleBuffer& getParticles() const { return particles; }
 
     void addParticles(const std::vector<Particle>& newParticles) {
-        particles.insert(particles.end(), newParticles.begin(), newParticles.end());
+        particles.reserve(particles.size() + newParticles.size());
+        for (const auto& p : newParticles) {
+            particles.addParticle(p.pos, p.vel);
+        }
     }
 
     void clearParticles() { particles.clear(); }
 
     SimulationStats stats;
     AggregatedStats aggrStats;
-    SimulationMode mode = SimulationMode::PARALLEL_SORT;
+    SimulationMode mode = SimulationMode::PARALLEL_RBGS;
 
 private:
     MACGrid grid;
-    std::vector<Particle> particles;
+    ParticleBuffer particles;
     std::vector<CellType> cellType;
 
     float materialDensity;
@@ -81,7 +86,6 @@ private:
 
     int pressureIterations;
 
-    void sortParticles();
     void advectParticles(float dt);
     void markFluidCells();
     void particlesToGrid();
@@ -93,7 +97,6 @@ private:
     void gridToParticles(const MACGrid& oldGrid, float dt);
 
     float sampleMACComponent(const MACGrid& g, const Vec3& pos, const Vec3& offset, int maxI, int maxJ, int maxK, float (MACGrid::* accessor)(int, int, int) const) const;
-
     Vec3 sampleMAC(const MACGrid& g, const Vec3& x) const;
 
     int cellIndex(int i, int j, int k) const;
